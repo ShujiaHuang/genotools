@@ -41,7 +41,7 @@ if __name__ == "__main__":
     args = cmdparser.parse_args()
 
     DS = "##FORMAT=<ID=DS,Number=A,Type=Float,Description=\"estimated ALT dose [P(RA) + 2*P(AA)]\">"
-    with gzip.open(args.input) if args.input.endswith(".gz") else open(args.input) as IN:
+    with gzip.open(args.input, "rt") if args.input.endswith(".gz") else open(args.input, "rt") as IN:
         for line in IN:
             if line.startswith("##"):
                 if args.vcf:
