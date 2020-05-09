@@ -11,7 +11,7 @@ from datetime import datetime
 
 
 def calculate_dosage_PL(pl, is_normalized=False):
-    w = np.array([0, 1, 2])  # Weight od Genotype for RR, R/A and A/A in dosage calculation
+    w = np.array([0, 1, 2])  # Weight of Genotype for RR, R/A and A/A in dosage calculation
     if len(pl) < 3:
         # PARs region of X Chromosome and there just 2 element in PL field.
         w = np.array([0, 2])
@@ -58,7 +58,10 @@ if __name__ == "__main__":
 
             col = line.strip().split()
             if line.startswith("#CHROM"):
-                print(line.strip()) if args.vcf else print("\t".join(col[:5] + col[9:]))
+                if args.vcf:
+                    print(line.strip())
+                else:
+                    print("\t".join(col[:5] + col[9:]))
                 continue
 
             # GT:AD:DP:GQ:PGT:PID:PL
@@ -78,14 +81,17 @@ if __name__ == "__main__":
 
             # calculate the samples' dosage one by one
             for sample in col[9:]:
-                pls = np.array(sample.split(":")[format_idx["PL"]].split(","), dtype=float)
-
-                # Do not
-                is_PARs_region_in_X_chromosome = True if len(pls) % 3 else False
                 ds = []
-                for i in range(allelic_num):
-                    ds.append(calculate_dosage_PL(pls[i:i + 3] if not is_PARs_region_in_X_chromosome else pls[i:i + 2],
-                                                  is_normalized=args.normalizePL))
+                pl = sample.split(":")[format_idx["PL"]]
+                if pl != ".":
+                    pls = np.array(pl.split(","), dtype=float)
+                    is_PARs_region_in_X_chromosome = True if len(pls) % 3 else False
+                    for i in range(allelic_num):
+                        ds.append(
+                            calculate_dosage_PL(pls[i:i + 3] if not is_PARs_region_in_X_chromosome else pls[i:i + 2],
+                                                is_normalized=args.normalizePL))
+                else:
+                    ds = [-1]
 
                 fields.append(sample + ":%s" % ",".join(map(str, ds)) if args.vcf else ",".join(map(str, ds)))
 
