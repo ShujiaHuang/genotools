@@ -1,0 +1,25 @@
+#!/bin/bash
+#environment for the python script
+source /opt/gridengine/default/common/settings.sh
+export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/opt/python/lib
+export PYTHONPATH=/ifs4/BC_PUB/biosoft/pipeline/Package/pymonitor/python
+export DRMAA_LIBRARY_PATH=/opt/gridengine/lib/linux-x64/libdrmaa.so
+export PYMONITOR_PY_PATH=/ifs4/BC_PUB/biosoft/pipeline/Package/pymonitor/pymonitor.py
+export PYMONITOR_SH_PATH=/ifs4/BC_PUB/biosoft/pipeline/Package/pymonitor/monitor.new
+export PYMONITOR_LOG_PATH=~/.pymonitor.log
+export PYMONITOR_CONF_PATH=~/.pymonitor.conf
+
+if [ "$1" = "cron" ]
+then
+  TASKLIST=`ps -o pid,args -u $USER`
+  CRONTASK=`echo "$TASKLIST" | awk '/pymonitor.py cron/ {print $1}'`
+  if [ -n "$CRONTASK" ]
+  then
+    echo kill -9 $CRONTASK
+  else
+    /opt/python/bin/python $PYMONITOR_PY_PATH "$@" 2>$PYMONITOR_LOG_PATH
+    #echo $USER >> /ifs5/PC_HUMAN_AP/USER/limiao/temp/monitor/log
+  fi
+else
+  /opt/python/bin/python $PYMONITOR_PY_PATH "$@"
+fi
