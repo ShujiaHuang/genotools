@@ -34,7 +34,7 @@ if __name__ == "__main__":
             n += 1
             if n % 100000 == 0:
                 elapsed_time = datetime.now() - START_TIME
-                sys.stderr.write("[INFO] Processing %d records done, %d seconds elapsed" % (n, elapsed_time.seconds))
+                sys.stderr.write("[INFO] Processing %d records done, %d seconds elapsed\n" % (n, elapsed_time.seconds))
 
             col = line.strip().split()
             for i, s in enumerate(col[9:]):
@@ -43,7 +43,7 @@ if __name__ == "__main__":
                 if gt != "0/0" and gt != "0|0" and gt != "0" and ("." not in gt):
                     sample_varaints_count[samples[i]] += 1
 
-    print ("#SAMPLE_ID\tVariantCount")
+    print("#SAMPLE_ID\tVariantCount")
     for s in samples:
         print("%s\t%d" % (s, sample_varaints_count[s]))
 
