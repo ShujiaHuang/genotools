@@ -16,7 +16,8 @@ def calculate_dosage_PL(pl, is_normalized=False):
         # PARs region of X Chromosome and there just 2 element in PL field.
         w = np.array([0, 2])
 
-    pr = 10 ** (-0.1 * np.array(pl, dtype=float))  # Transformation Phred-scale to be Probability
+    # Recover Genotype Likelihood of each individual
+    pr = 10 ** (-0.1 * np.array(pl, dtype=float))  # Transformation Phred-scale to Genotype posterior probability
     if is_normalized:
         pr = recover_PL(pr)
 
