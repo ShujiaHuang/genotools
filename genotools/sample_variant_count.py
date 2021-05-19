@@ -34,7 +34,8 @@ if __name__ == "__main__":
             n += 1
             if n % 100000 == 0:
                 elapsed_time = datetime.now() - START_TIME
-                sys.stderr.write("[INFO] Processing %d records done, %d seconds elapsed\n" % (n, elapsed_time.seconds))
+                sys.stderr.write("[INFO] Processing %d records done, " 
+                                 "%d seconds elapsed\n" % (n, elapsed_time.seconds))
 
             col = line.strip().split()
             ref = col[3]
@@ -53,6 +54,9 @@ if __name__ == "__main__":
                         sample_varaints_count[samples[i]][2] += 1
                     else:  # Deletion
                         sample_varaints_count[samples[i]][3] += 1
+
+    elapsed_time = datetime.now() - START_TIME
+    sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed\n" % (n, elapsed_time.seconds))
 
     print("#SAMPLE_ID\tVariantCount\tSNP\tInsertion\tDeletion")
     for s in samples:
