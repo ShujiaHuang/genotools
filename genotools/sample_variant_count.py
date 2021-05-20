@@ -63,4 +63,4 @@ if __name__ == "__main__":
         print("%s\t%s" % (s, "\t".join(map(str, sample_varaints_count[s]))))
 
     elapsed_time = datetime.now() - START_TIME
-    sys.stderr.write("\n** process done, %d seconds elapsed **\n" % elapsed_time.seconds)
+    sys.stderr.write("\n** All process done, %d seconds elapsed **\n" % elapsed_time.seconds)
