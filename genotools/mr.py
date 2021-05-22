@@ -59,11 +59,21 @@ def load_fam_file(fname):
     return child_mother_pairs
 
 
-def calcute_variant_score(mother_gt_info, child_gt_info, format=None):
+def calcute_variant_score(mother_gt_info, child_gt_info, format=None, is_dosage=True):
     """
     Format of ``mother_gt_info`` and ``child_gt_info`` should be "GT:xxx:GP"
     ``format`` is a dict, and must have 'GT' and 'GP' in it.
     """
+
+    def haplotype_score(gt, alt_dosage_score, ref_score):
+        if sum(gt) == 0:  # homo-ref
+            score = [ref_score, ref_score]
+        elif sum(gt) == 1:  # het
+            score = [1.0 - alt_dosage_score, alt_dosage_score]
+        else:  # homo variants
+            score = [alt_dosage_score / 2, alt_dosage_score / 2]
+        return score
+
     mother_data = mother_gt_info.split(":")
     if "." in mother_data[format["GT"]]:
         return None, None, None, None, None
@@ -78,19 +88,21 @@ def calcute_variant_score(mother_gt_info, child_gt_info, format=None):
     child_gt = list(map(int, child_data[format["GT"]].split("|")))
     child_gp = list(map(float, child_data[format["GP"]].split(",")))
 
-    mg = mother_gp[1] + 2 * mother_gp[2]  # mother genotype score set to be the dosage
-    cg = child_gp[1] + 2 * child_gp[2]  # child genotype score set to be the dosage
-    mother_allele_prob = [mother_gp[0], mg / 2]
-    child_allele_prob = [child_gp[0], cg / 2]
+    # mother and child genotype score set to be the dosage
+    m_ds = mother_gp[1] + 2 * mother_gp[2] if is_dosage else sum(mother_gt)
+    c_ds = child_gp[1] + 2 * child_gp[2] if is_dosage else sum(child_gt)
+
+    mother_hap_score = haplotype_score(mother_gt, m_ds, mother_gp[0] if is_dosage else 0)
+    child_hap_score = haplotype_score(child_gt, c_ds, child_gp[0] if is_dosage else 0)
 
     if child_gt[0] == mother_gt[0]:
-        m1 = mother_allele_prob[child_gt[0]]  # transmitted
-        m2 = mother_allele_prob[1 - child_gt[0]]  # un-transmitted allele
-        c2 = child_allele_prob[child_gt[1]]  # paternal allele
+        m1 = mother_hap_score[mother_gt[0]]  # transmitted
+        m2 = mother_hap_score[mother_gt[1]]  # un-transmitted allele
+        c2 = child_hap_score[child_gt[1]]  # paternal allele
     elif child_gt[1] == mother_gt[1]:
-        m1 = mother_allele_prob[child_gt[1]]  # transmitted
-        m2 = mother_allele_prob[1 - child_gt[1]]  # un-transmitted allele
-        c2 = child_allele_prob[child_gt[0]]  # paternal allele
+        m1 = mother_hap_score[mother_gt[1]]  # transmitted
+        m2 = mother_hap_score[mother_gt[0]]  # un-transmitted allele
+        c2 = child_hap_score[child_gt[0]]  # paternal allele
     else:
         return None, None, None, None, None  # de novo mutation
 
@@ -99,7 +111,7 @@ def calcute_variant_score(mother_gt_info, child_gt_info, format=None):
     # m1: haplotype-based genetic score of transmitted allele
     # m2: haplotype-based genetic score of un-transmitted allele
     # c2: haplotype-based genetic score of paternal transmitted allele
-    return mg, cg, m1, m2, c2
+    return m_ds, c_ds, m1, m2, c2
 
 
 def only_output(in_vcf_fn, pos_beta_value, child_mother_pairs):
@@ -154,7 +166,7 @@ def only_output(in_vcf_fn, pos_beta_value, child_mother_pairs):
             print("%s" % "\t".join(map(str, out)))
 
 
-def calculate_PRS(in_vcf_fn, pos_beta_value, child_mother_pairs):
+def calculate_PRS(in_vcf_fn, pos_beta_value, child_mother_pairs, is_dosage=True):
     sample2index = {}
     index2sample = {}
     gs, af_beta = {}, {}
@@ -206,7 +218,8 @@ def calculate_PRS(in_vcf_fn, pos_beta_value, child_mother_pairs):
                 if ("|" not in col[m] and "." not in col[m]) or ("|" not in col[c] and "." not in col[c]):
                     raise ValueError("[ERORR] The VCF file must be phased. %s, %s" % (col[m], col[c]))
 
-                mg, cg, m1, m2, c2 = calcute_variant_score(col[m], col[c], format=ind_format)
+                mg, cg, m1, m2, c2 = calcute_variant_score(col[m], col[c], format=ind_format,
+                                                           is_dosage=is_dosage)
                 k = index2sample[m] + "_" + index2sample[c]
                 if mg is not None:
                     # mg: mother genotype-based genetic score (calculate by dosage)
@@ -334,7 +347,7 @@ if __name__ == "__main__":
         child_mother_pairs = load_fam_file(args.famfile)
         pos_beta_value = load_postion_beta_info(args.betavaluefile)
         sys.stderr.write("[INFO] Load beta value done.\n")
-        calculate_PRS(args.input, pos_beta_value, child_mother_pairs)
+        calculate_PRS(args.input, pos_beta_value, child_mother_pairs, is_dosage=False)
     elif args.command == "MR":
         data = pd.read_table(args.input, sep="\t")
         mendelian_randomization(data, args.y_name, args.x_name, args.covar_name)
