@@ -19,10 +19,9 @@ def load_postion_beta_info(fname):
     data = {}
     with gzip.open(fname, "rt") if fname.endswith(".gz") else open(fname, "rt") as IN:
         """
-        #CHROM	POS	BETA
-        1	13273	12.8134	
-        1	13649	23.4539	
-        1	17375	63.2547
+        #CHR    BP      A1      A2      BETA
+        1       16985387        T       C       0.0653752
+        1       50592823        A       T       3.44671
         """
         for line in IN:
             if line.startswith("#"):
@@ -31,7 +30,7 @@ def load_postion_beta_info(fname):
             col = line.strip().split()
             col[0] = col[0] if col[0].startswith("chr") else "chr" + col[0]  # add 'chr'
             pos = col[0] + ":" + col[1]
-            data[pos] = float(col[2])  # beta value.
+            data[pos] = [col[2].upper(), col[3].upper(), float(col[4])]  # [A1, A2, beta-value]
 
     return data
 
@@ -202,11 +201,23 @@ def calculate_PRS(in_vcf_fn, pos_beta_value, child_mother_pairs, is_dosage=True)
                 sys.stderr.write("[INFO] Processing %d records done, "
                                  "%d seconds elapsed\n" % (n, elapsed_time.seconds))
 
+            # chr7   44184122    rs730497        G       A
+
             pos = col[0] + ":" + col[1]
+            ref_allele = col[3].upper()
+            alt_allele = col[4].upper()
             if pos not in pos_beta_value:
                 continue
 
-            beta = pos_beta_value[pos]
+            # a1 is the effective allele(means the minor allele), a2 is the major allele.
+            a1, a2, beta = pos_beta_value[pos]
+
+            if (ref_allele + alt_allele != a1 + a2) and (alt_allele + ref_allele != a1 + a2):
+                continue
+
+            if alt_allele != a1:
+                beta = -1.0 * beta
+
             info = {c.split("=")[0]: c.split("=")[-1] for c in col[7].split(";") if "=" in c}
             af = float(info["AF"])
 
