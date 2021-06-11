@@ -242,7 +242,7 @@ def calculate_PRS(in_vcf_fn, pos_beta_value, child_mother_pairs, is_dosage=True)
                     af_beta[k].append([af, beta])
 
     elapsed_time = datetime.now() - START_TIME
-    sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed\n" % (n, elapsed_time.seconds))
+    sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapsed_time.seconds))
 
     # calculate the PRS for each type of allele
     print("#Sample_G1\tSample_G2\tmaternal_genotype_score\tchild_genotype_score\tM1(C1)\tM2\tC2")
@@ -327,11 +327,11 @@ if __name__ == "__main__":
     cmdparser = argparse.ArgumentParser(description="Usage: ")
     commands = cmdparser.add_subparsers(dest="command", title="Commands")
     prs_cmd = commands.add_parser("PRS", help="Calculate PRS")
-    prs_cmd.add_argument("-I", "--input", dest="input", type=str, required=True,
+    prs_cmd.add_argument("-I", "--target", dest="target", type=str, required=True,
                          help="Input VCF. Required.")
     prs_cmd.add_argument("--famfile", dest="famfile", type=str, required=True,
                          help="A .fam file")
-    prs_cmd.add_argument("--betavaluefile", dest="betavaluefile", type=str, required=True,
+    prs_cmd.add_argument("-b", "--base", dest="base", type=str, required=True,
                          help="A POS file with beta value for each position")
 
     mr_cmd = commands.add_parser("MR", help="Mendelian Randomization")
@@ -356,9 +356,9 @@ if __name__ == "__main__":
 
     if args.command == "PRS":
         child_mother_pairs = load_fam_file(args.famfile)
-        pos_beta_value = load_postion_beta_info(args.betavaluefile)
+        pos_beta_value = load_postion_beta_info(args.base)
         sys.stderr.write("[INFO] Load beta value done.\n")
-        calculate_PRS(args.input, pos_beta_value, child_mother_pairs, is_dosage=False)
+        calculate_PRS(args.target, pos_beta_value, child_mother_pairs, is_dosage=False)
     elif args.command == "MR":
         data = pd.read_table(args.input, sep="\t")
         mendelian_randomization(data, args.y_name, args.x_name, args.covar_name)
