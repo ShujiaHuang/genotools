@@ -288,7 +288,7 @@ def add_phenotype(in_prs_fn, in_pheno_file):
 
             col = line.strip().split()
             for i in range(len(col)):
-                if col[i] == "-9":
+                if col[i] == "-9" or col[i] == "-9.0":
                     col[i] = "NA"
 
             sample_id = col[0]
