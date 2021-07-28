@@ -52,13 +52,18 @@ if __name__ == "__main__":
                            help="Phenotypes' labels seperate by comma which need to be normalization.")
     cmdparser.add_argument("-O", "--output", dest="output", type=str, required=True,
                            help="output file path. Required.")
+    cmdparser.add_argument("--donot_remove_outliner", dest="donot_remove_outliner", action="store_true",
+                           help="Do not remove outliner value.")
 
     args = cmdparser.parse_args()
     df = pd.read_table(args.input, sep="\t")
     phenotypes = args.phenotype.strip().split(",")
 
     for f in phenotypes:
-        df[f] = pd.Series(rankbase_normality(df[f], rmoutliner=True, nan_data_mark=-9))
+        if args.donot_remove_outliner:
+            df[f] = pd.Series(rankbase_normality(df[f], rmoutliner=False, nan_data_mark=-9))
+        else:
+            df[f] = pd.Series(rankbase_normality(df[f], rmoutliner=True, nan_data_mark=-9))
     
     df.to_csv(args.output, sep="\t")
 
