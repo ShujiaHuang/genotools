@@ -15,34 +15,37 @@ import statsmodels.api as sm
 START_TIME = datetime.now()
 
 
-def load_postion_beta_info(fname):
-    data = {}
+def get_beta_value(fname):
+    beta = {}
     with gzip.open(fname, "rt") if fname.endswith(".gz") else open(fname, "rt") as IN:
         """
-        #CHR    BP      A1      A2      BETA
-        1       16985387        T       C       0.0653752
-        1       50592823        A       T       3.44671
+        snp	chr	pos	A	B	beta	se	pval	freq	REF	ALT
+        rs340874	chr1	213985913	C	T	0.0174	0.0032	6.80E-08	0.5175	T	C
+        rs1371614	chr2	26930006	T	C	0.0191	0.0045	2.36E-05	0.2513	C	T
+        rs780094	chr2	27518370	C	T	0.0325	0.0032	3.30E-24	0.6044	NA	NA
+        rs560887	chr2	168906638	C	T	0.0731	0.0034	4.68E-100	0.7019	T	C
         """
         for line in IN:
-            if line.startswith("#"):
+            if line.startswith("snp") or line.startswith("SNP"):
                 continue
 
             col = line.strip().split()
-            col[0] = col[0] if col[0].startswith("chr") else "chr" + col[0]  # add 'chr'
-            pos = col[0] + ":" + col[1]
-            data[pos] = [col[2].upper(), col[3].upper(), float(col[4])]  # [A1, A2, beta-value]
+            col[1] = col[1] if col[1].startswith("chr") else "chr" + col[1]
+            pos = col[1] + ":" + col[2]
 
-    return data
+            # [Effect allele, non-Effect allele, GWAS beta value]
+            beta[pos] = [col[3].upper(), col[4].upper(), float(col[5])]
+
+    return beta
 
 
-def load_fam_file(fname):
+def get_child_mother_duos(fname):
     child_mother_pairs = {}
     with gzip.open(fname, "rt") if fname.endswith(".gz") else open(fname, "rt") as IN:
         """
         #Family IID FID MID Gender Phenotype
         6596178	16101233BFF2	0	00116011243M27BFF2	2	-9
         4459907	17200664BFF2	0	00116101038M15BFF2	1	-9
-        1981164	00115091019M18BFF2	0	0	2	-9
         """
         for line in IN:
             if line.startswith("#"):
@@ -50,7 +53,7 @@ def load_fam_file(fname):
 
             col = line.strip().split()
             child, mother = col[1], col[3]
-            if mother == "0":
+            if mother == "0":  # Only get child-mother pairs.
                 continue
 
             child_mother_pairs[child] = [mother, child]
@@ -63,11 +66,12 @@ def calcute_variant_score(mother_gt_info, child_gt_info, format=None, is_dosage=
     Format of ``mother_gt_info`` and ``child_gt_info`` should be "GT:xxx:GP"
     ``format`` is a dict, and must have 'GT' and 'GP' in it.
     """
+
     def haplotype_score(gt, alt_score):
         if gt == 0:  # homo-ref
             score = [0.0, 0.0]
         elif gt == 1:  # het
-            score = [0.0, alt_score/2]
+            score = [0.0, alt_score / 2]
         else:  # homo variants
             score = [alt_score / 2, alt_score / 2]
         return score
@@ -96,11 +100,11 @@ def calcute_variant_score(mother_gt_info, child_gt_info, format=None, is_dosage=
     if child_gt[0] == mother_gt[0]:
         m1 = mother_hap_score[mother_gt[0]]  # transmitted
         m2 = mother_hap_score[mother_gt[1]]  # un-transmitted allele
-        c2 = child_hap_score[child_gt[1]]    # paternal allele
+        c2 = child_hap_score[child_gt[1]]  # paternal allele
     elif child_gt[1] == mother_gt[1]:
         m1 = mother_hap_score[mother_gt[1]]  # transmitted
         m2 = mother_hap_score[mother_gt[0]]  # un-transmitted allele
-        c2 = child_hap_score[child_gt[0]]    # paternal allele
+        c2 = child_hap_score[child_gt[0]]  # paternal allele
     else:
         return None, None, None, None, None  # de novo mutation
 
@@ -164,9 +168,41 @@ def only_output(in_vcf_fn, pos_beta_value, child_mother_pairs):
             print("%s" % "\t".join(map(str, out)))
 
 
-def calculate_PRS(in_vcf_fn, pos_beta_value, child_mother_pairs, is_dosage=True):
-    sample2index = {}
-    index2sample = {}
+def distinguish_allele(maternal_GT, child_GT):
+    h1, h2, h3 = None, None, None
+    if (sum(maternal_GT) == 2 and sum(child_GT) == 0) or (sum(maternal_GT) == 0 and sum(child_GT) == 2):
+        # Mendelian error
+        return h1, h2, h3
+
+    # 0,1 => 0,1
+    if (sum(maternal_GT) == 1) and (sum(child_GT) == 1):
+        # can not distinguish the maternal allele
+        return h1, h2, h3
+
+    if sum(maternal_GT) == 0:
+        h1, h2 = 0, 0
+        h3 = 0 if sum(child_GT) == 0 else 1
+
+    elif sum(maternal_GT) == 1:  # 01 or 10
+        if sum(child_GT) == 0:   # could only be 0 or 2
+            h1, h2, h2 = 0, 1, 0
+        elif sum(child_GT) == 2:
+            h1, h2, h3 = 1, 0, 1
+        else:
+            raise ValueError("[ERROR] Child Genotype error.")
+
+    elif sum(maternal_GT) == 2:
+        h1, h2 = 1, 1
+        h3 = 1 if sum(child_GT) == 2 else 0  # sum(child_GT) could only be 1 or 2
+
+    else:
+        raise ValueError("[ERROR] Maternal genotype error!")
+
+    return h1, h2, h3
+
+
+def calculate_genetic_score(in_vcf_fn, pos_beta_value, child_mother_pairs):
+    sample2index, index2sample = {}, {}
     gs, af_beta = {}, {}
     mother_child_idx = []
     n = 0
@@ -178,7 +214,7 @@ def calculate_PRS(in_vcf_fn, pos_beta_value, child_mother_pairs, is_dosage=True)
 
             col = line.strip().split()
             if line.startswith("#CHROM"):
-                for i in range(9, len(col)):
+                for i in range(9, len(col)):  # load sample ID and the index of sample
                     sample2index[col[i]] = i
                     index2sample[i] = col[i]
 
@@ -196,23 +232,30 @@ def calculate_PRS(in_vcf_fn, pos_beta_value, child_mother_pairs, is_dosage=True)
 
             n += 1
             if n % 100000 == 0:
-                elapsed_time = datetime.now() - START_TIME
-                sys.stderr.write("[INFO] Processing %d records done, "
-                                 "%d seconds elapsed\n" % (n, elapsed_time.seconds))
+                elapse_time = datetime.now() - START_TIME
+                sys.stderr.write("[INFO] Processing %d records done, %d seconds elapsed\n" % (n, elapse_time.seconds))
 
-            # chr7   44184122    rs730497        G       A
+            """
+            #CHROM  POS     ID      REF     ALT
+            chr7   44184122    rs730497        G       A
+            """
             pos = col[0] + ":" + col[1]
             ref_allele = col[3].upper()
             alt_allele = col[4].upper()
+
+            if "," in alt_allele:  # ignore multi-allelic
+                continue
+
             if pos not in pos_beta_value:
                 continue
 
-            # a1 is the effective allele(means the minor allele), a2 is the major allele.
+            # a1 is the effective allele, a2 is the non-effective allele.
             a1, a2, beta = pos_beta_value[pos]
-            if (ref_allele + alt_allele != a1 + a2) and (alt_allele + ref_allele != a1 + a2):
-                continue
+            if (ref_allele + alt_allele != a1 + a2) or (alt_allele + ref_allele != a1 + a2):
+                raise ValueError("[ERROR] Alleles not matched: "
+                                 "[%s, %s] != [%s, %s]" % (ref_allele, alt_allele, a1, a2))
 
-            if alt_allele != a1:  # a1 is the effect allele
+            if ref_allele == a1:
                 beta = -1.0 * beta
 
             info = {c.split("=")[0]: c.split("=")[-1] for c in col[7].split(";") if "=" in c}
@@ -223,38 +266,58 @@ def calculate_PRS(in_vcf_fn, pos_beta_value, child_mother_pairs, is_dosage=True)
                 raise ValueError("[ERROR]VCF ERROR: GT or GP not in FORMAT.")
 
             for m, c in mother_child_idx:
-                if ("|" not in col[m] and "." not in col[m]) or ("|" not in col[c] and "." not in col[c]):
-                    raise ValueError("[ERORR] The VCF file must be phased. %s, %s" % (col[m], col[c]))
+                # Genotype should be: ["0", "0"], ["0", "1"], ["1", "0"] or ["1", "1"]
+                mother_gt = col[m].split(":")[ind_format["GT"]].replace("/", "|").split("|")
+                child_gt = col[c].split(":")[ind_format["GT"]].replace("/", "|").split("|")
 
-                mg, cg, m1, m2, c2 = calcute_variant_score(col[m], col[c], format=ind_format, is_dosage=is_dosage)
+                # Should be the probability of genotype: [0.99, 0.01, 0.00]
+                # mother_gp = list(map(float, col[m].split(":")[ind_format["GP"]].split(",")))
+                # child_gp = list(map(float, col[c].split(":")[ind_format["GP"]].split(",")))
+
+                if ("." in mother_gt) or ("." in child_gt):
+                    continue
+
+                mother_gt = list(map(int, mother_gt))  # [0, 0], [0, 1], [1, 0] or [1, 1]
+                child_gt = list(map(int, child_gt))  # [0, 0], [0, 1], [1, 0] or [1, 1]
+
+                # `h1`: maternal transmitted allele
+                # `h2`: maternal non-transmitted allele
+                # `h3`: paternal transmitted allele (fetal only allele)
+                h1, h2, h3 = distinguish_allele(mother_gt, child_gt)
+                if h1 is None:
+                    continue
+
+                # `s_h1`: maternal transmitted haplotype genetic score
+                # `s_h2`: maternal non-transmitted haplotype genetic score
+                # `s_h3`: paternal (fetal only) transmitted haplotype genetic score
+                # `s_mat`: maternal genotype score
+                # `s_fet`: fetal genotype score
+                s_h1 = h1 * beta
+                s_h2 = h2 * beta
+                s_h3 = h3 * beta
+                s_mat = s_h1 + s_h2
+                s_fet = s_h1 + s_h3
+
                 k = index2sample[m] + "_" + index2sample[c]
-                if mg is not None:
-                    # mg: mother genotype-based genetic score (calculate by dosage)
-                    # cg: child genotype-based genetic score (calculate by dosage)
-                    # m1: haplotype-based genetic score of transmitted allele
-                    # m2: haplotype-based genetic score of un-transmitted allele
-                    # c2: haplotype-based genetic score of paternal transmitted allele
-                    gs[k].append([mg, cg, m1, m2, c2])
-                    af_beta[k].append([af, beta])
+                if k not in gs:
+                    gs[k] = []
 
-    elapsed_time = datetime.now() - START_TIME
-    sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapsed_time.seconds))
+                gs[k].append([s_mat, s_fet, s_h1, s_h2, s_h3])
+
+    elapse_time = datetime.now() - START_TIME
+    sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapse_time.seconds))
 
     # calculate the PRS for each type of allele
-    print("#Sample_G1\tSample_G2\tmaternal_genotype_score\tchild_genotype_score\tM1(C1)\tM2\tC2")
+    print("#Mother\tChild\tmaternal_genotype_score\tchild_genotype_score\th1\th2\th3\tsite_number")
     for m, c in mother_child_idx:
         k = index2sample[m] + "_" + index2sample[c]
-        n = len(gs[k])
-        gs[k] = np.array(gs[k])
-        af_beta[k] = np.array(af_beta[k])  # [AF, Beta]
-
-        prs = np.sum(af_beta[k][:, 1].reshape(n, 1) * gs[k], axis=0) / n
-        print("%s\t%s\t%s" % (index2sample[m], index2sample[c], "\t".join(map(str, prs))))
+        score = np.mean(gs[k], axis=0)
+        print("%s\t%s\t%s\t%d" % (index2sample[m], index2sample[c], "\t".join(map(str, score)), len(gs[k])))
 
     return
 
 
-def add_phenotype(in_prs_fn, in_pheno_file):
+def phenotype_concat(in_prs_fn, in_pheno_file):
     prs_data = {}
     header = []
     with open(in_prs_fn, "rt") as I:
@@ -324,46 +387,48 @@ def mendelian_randomization(data, y_name, x_names, covar_names):
 
 
 if __name__ == "__main__":
-    cmdparser = argparse.ArgumentParser(description="Usage: ")
-    commands = cmdparser.add_subparsers(dest="command", title="Commands")
-    prs_cmd = commands.add_parser("PRS", help="Calculate PRS")
-    prs_cmd.add_argument("-I", "--target", dest="target", type=str, required=True,
-                         help="Input VCF. Required.")
-    prs_cmd.add_argument("--famfile", dest="famfile", type=str, required=True,
-                         help="A .fam file")
-    prs_cmd.add_argument("-b", "--base", dest="base", type=str, required=True,
-                         help="A POS file with beta value for each position")
+    cmd_parser = argparse.ArgumentParser(description="Usage: ")
+    commands = cmd_parser.add_subparsers(dest="command", title="Commands")
+
+    gs_cmd = commands.add_parser("GS", help="Calculate Genetic score")
+    gs_cmd.add_argument("-I", "--target", dest="target", type=str, required=True,
+                        help="Input VCF. Required.")
+    gs_cmd.add_argument("-b", "--base", dest="base", type=str, required=True,
+                        help="A POS file with beta value for each position")
+    gs_cmd.add_argument("--fam", dest="fam", type=str, required=True,
+                        help="Input a .fam file with mother and children.")
 
     mr_cmd = commands.add_parser("MR", help="Mendelian Randomization")
     mr_cmd.add_argument("-I", "--input", dest="input", type=str, required=True,
                         help="Input data file")
-    mr_cmd.add_argument("--y-name", dest="y_name", type=str, required=True,
+    mr_cmd.add_argument("-y", dest="y_name", type=str, required=True,
                         help="Load the designated data as y from the '--input'.")
-    mr_cmd.add_argument("--x-name", dest="x_name", type=str, required=True,
+    mr_cmd.add_argument("-x", dest="x_name", type=str, required=True,
                         help="Load the designated phenotype(s) as x from the '--input'.")
-    mr_cmd.add_argument("--covar-name", dest="covar_name", type=str, required=True,
+    mr_cmd.add_argument("--covar", dest="covar_name", type=str, required=True,
                         help="Only load the designated covariate(s) from the '--input'.")
 
-    add_cmd = commands.add_parser("ADD", help="Concat PRS data together with phenotype data.")
-    add_cmd.add_argument("--PRS", dest="prs", type=str, required=True, help="PRS result.")
-    add_cmd.add_argument("--pheno", dest="pheno", type=str, required=True, help="phenotype data.")
+    add_cmd = commands.add_parser("ADD", help="Concat genetic score data together with phenotype data.")
+    add_cmd.add_argument("-g", dest="genetic_score", type=str, required=True, help="input genetic score file.")
+    add_cmd.add_argument("-p", dest="phenotype", type=str, required=True, help="input phenotype data file.")
 
     if len(sys.argv) < 2:
-        cmdparser.print_help()
+        cmd_parser.print_help()
         sys.exit(1)
 
-    args = cmdparser.parse_args()
+    args = cmd_parser.parse_args()
 
-    if args.command == "PRS":
-        child_mother_pairs = load_fam_file(args.famfile)
-        pos_beta_value = load_postion_beta_info(args.base)
-        sys.stderr.write("[INFO] Load beta value done.\n")
-        calculate_PRS(args.target, pos_beta_value, child_mother_pairs, is_dosage=True)
+    if args.command == "GS":
+        child_mother_pairs = get_child_mother_duos(args.fam)
+        beta_value = get_beta_value(args.base)
+        calculate_genetic_score(args.target, beta_value, child_mother_pairs, is_dosage=True)
+
     elif args.command == "MR":
         data = pd.read_table(args.input, sep="\t")
         mendelian_randomization(data, args.y_name, args.x_name, args.covar_name)
+
     elif args.command == "ADD":
-        add_phenotype(args.prs, args.pheno)
+        phenotype_concat(args.genetic_score, args.phenotype)
 
     elapsed_time = datetime.now() - START_TIME
     sys.stderr.write("\n** process done, %d seconds elapsed **\n" % elapsed_time.seconds)
