@@ -169,23 +169,23 @@ def only_output(in_vcf_fn, pos_beta_value, child_mother_pairs):
 
 
 def distinguish_allele(maternal_GT, child_GT):
-    h1, h2, h3 = None, None, None
     if (sum(maternal_GT) == 2 and sum(child_GT) == 0) or (sum(maternal_GT) == 0 and sum(child_GT) == 2):
         # Mendelian error
-        return h1, h2, h3
+        return None, None, None
 
     # 0,1 => 0,1
     if (sum(maternal_GT) == 1) and (sum(child_GT) == 1):
         # can not distinguish the maternal allele
-        return h1, h2, h3
+        return None, None, None
 
+    h1, h2, h3 = None, None, None
     if sum(maternal_GT) == 0:
         h1, h2 = 0, 0
         h3 = 0 if sum(child_GT) == 0 else 1
 
     elif sum(maternal_GT) == 1:  # 01 or 10
         if sum(child_GT) == 0:   # could only be 0 or 2
-            h1, h2, h2 = 0, 1, 0
+            h1, h2, h3 = 0, 1, 0
         elif sum(child_GT) == 2:
             h1, h2, h3 = 1, 0, 1
         else:
@@ -193,7 +193,7 @@ def distinguish_allele(maternal_GT, child_GT):
 
     elif sum(maternal_GT) == 2:
         h1, h2 = 1, 1
-        h3 = 1 if sum(child_GT) == 2 else 0  # sum(child_GT) could only be 1 or 2
+        h3 = sum(child_GT) - h2  # child_GT) could only be [0,1]/[1,0] or [1,1]
 
     else:
         raise ValueError("[ERROR] Maternal genotype error!")
@@ -251,7 +251,7 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, child_mother_pairs):
 
             # a1 is the effective allele, a2 is the non-effective allele.
             a1, a2, beta = pos_beta_value[pos]
-            if (ref_allele + alt_allele != a1 + a2) or (alt_allele + ref_allele != a1 + a2):
+            if (ref_allele + alt_allele != a1 + a2) and (alt_allele + ref_allele != a1 + a2):
                 raise ValueError("[ERROR] Alleles not matched: "
                                  "[%s, %s] != [%s, %s]" % (ref_allele, alt_allele, a1, a2))
 
@@ -273,7 +273,6 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, child_mother_pairs):
                 # Should be the probability of genotype: [0.99, 0.01, 0.00]
                 # mother_gp = list(map(float, col[m].split(":")[ind_format["GP"]].split(",")))
                 # child_gp = list(map(float, col[c].split(":")[ind_format["GP"]].split(",")))
-
                 if ("." in mother_gt) or ("." in child_gt):
                     continue
 
@@ -390,7 +389,7 @@ if __name__ == "__main__":
     cmd_parser = argparse.ArgumentParser(description="Usage: ")
     commands = cmd_parser.add_subparsers(dest="command", title="Commands")
 
-    gs_cmd = commands.add_parser("GS", help="Calculate Genetic score")
+    gs_cmd = commands.add_parser("GeneticScore", help="Calculate Genetic score")
     gs_cmd.add_argument("-I", "--target", dest="target", type=str, required=True,
                         help="Input VCF. Required.")
     gs_cmd.add_argument("-b", "--base", dest="base", type=str, required=True,
@@ -418,10 +417,10 @@ if __name__ == "__main__":
 
     args = cmd_parser.parse_args()
 
-    if args.command == "GS":
+    if args.command == "GeneticScore":
         child_mother_pairs = get_child_mother_duos(args.fam)
         beta_value = get_beta_value(args.base)
-        calculate_genetic_score(args.target, beta_value, child_mother_pairs, is_dosage=True)
+        calculate_genetic_score(args.target, beta_value, child_mother_pairs)
 
     elif args.command == "MR":
         data = pd.read_table(args.input, sep="\t")
