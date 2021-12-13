@@ -317,7 +317,7 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, child_mother_pairs):
 
 
 def phenotype_concat(in_prs_fn, in_pheno_file):
-    prs_data = {}
+    gs_data = {}
     header = []
     with open(in_prs_fn, "rt") as I:
         """
@@ -333,7 +333,7 @@ def phenotype_concat(in_prs_fn, in_pheno_file):
                 continue
 
             col = line.strip().split()
-            prs_data[col[0]] = col
+            gs_data[col[0]] = col
 
     with open(in_pheno_file, "rt") as I:
         n = 0
@@ -354,8 +354,8 @@ def phenotype_concat(in_prs_fn, in_pheno_file):
                     col[i] = "NA"
 
             sample_id = col[0]
-            if sample_id in prs_data:
-                print("%s" % "\t".join(prs_data[sample_id] + col[1:]))
+            if sample_id in gs_data:
+                print("%s" % "\t".join(gs_data[sample_id] + col[1:]))
 
 
 def mendelian_randomization(data, y_name, x_names, covar_names):
