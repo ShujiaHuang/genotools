@@ -61,113 +61,6 @@ def get_child_mother_duos(fname):
     return child_mother_pairs
 
 
-def calcute_variant_score(mother_gt_info, child_gt_info, format=None, is_dosage=True):
-    """
-    Format of ``mother_gt_info`` and ``child_gt_info`` should be "GT:xxx:GP"
-    ``format`` is a dict, and must have 'GT' and 'GP' in it.
-    """
-
-    def haplotype_score(gt, alt_score):
-        if gt == 0:  # homo-ref
-            score = [0.0, 0.0]
-        elif gt == 1:  # het
-            score = [0.0, alt_score / 2]
-        else:  # homo variants
-            score = [alt_score / 2, alt_score / 2]
-        return score
-
-    mother_data = mother_gt_info.split(":")
-    if "." in mother_data[format["GT"]]:
-        return None, None, None, None, None
-
-    mother_gt = list(map(int, mother_data[format["GT"]].split("|")))  # Should be: [0,0], [0,1], [1,1]
-    mother_gp = list(map(float, mother_data[format["GP"]].split(",")))  # probability for the genotype: [0.99, 0.01, 0]
-
-    child_data = child_gt_info.split(":")
-    if "." in child_data[format["GT"]]:
-        return None, None, None, None, None
-
-    child_gt = list(map(int, child_data[format["GT"]].split("|")))
-    child_gp = list(map(float, child_data[format["GP"]].split(",")))
-
-    # mother and child genotype score set to be the dosage
-    m_ds = mother_gp[1] + 2 * mother_gp[2] if is_dosage else sum(mother_gt)
-    c_ds = child_gp[1] + 2 * child_gp[2] if is_dosage else sum(child_gt)
-
-    mother_hap_score = haplotype_score(sum(mother_gt), m_ds)
-    child_hap_score = haplotype_score(sum(child_gt), c_ds)
-
-    if child_gt[0] == mother_gt[0]:
-        m1 = mother_hap_score[mother_gt[0]]  # transmitted
-        m2 = mother_hap_score[mother_gt[1]]  # un-transmitted allele
-        c2 = child_hap_score[child_gt[1]]  # paternal allele
-    elif child_gt[1] == mother_gt[1]:
-        m1 = mother_hap_score[mother_gt[1]]  # transmitted
-        m2 = mother_hap_score[mother_gt[0]]  # un-transmitted allele
-        c2 = child_hap_score[child_gt[0]]  # paternal allele
-    else:
-        return None, None, None, None, None  # de novo mutation
-
-    # mg: mother genotype-based genetic score (calculate by dosage)
-    # cg: child genotype-based genetic score (calculate by dosage)
-    # m1: haplotype-based genetic score of transmitted allele
-    # m2: haplotype-based genetic score of un-transmitted allele
-    # c2: haplotype-based genetic score of paternal transmitted allele
-    return m_ds, c_ds, m1, m2, c2
-
-
-def only_output(in_vcf_fn, pos_beta_value, child_mother_pairs):
-    sample2index = {}
-    mother_child_idx = []
-    with gzip.open(in_vcf_fn, "rt") if in_vcf_fn.endswith(".gz") else open(in_vcf_fn, "rt") as IN:
-        # VCF file
-        for line in IN:
-            if line.startswith("##"):
-                continue
-
-            col = line.strip().split()
-            if line.startswith("#CHROM"):
-                for i in range(9, len(col)):
-                    sample2index[col[i]] = i
-
-                header = col[:5] + ["AF", "BETA"]
-                for i in range(9, len(col)):
-                    sample_id = col[i]
-                    if sample_id in child_mother_pairs:
-                        mother, child = child_mother_pairs[sample_id]
-                        if (mother not in sample2index) or (child not in sample2index):
-                            raise ValueError("[ERROR] %s or %s not in VCF" % (mother, child))
-
-                        mother_child_idx.append([sample2index[mother], sample2index[child]])
-                        header.append(mother + "_" + child)
-                print("%s" % "\t".join(header))
-                continue
-
-            pos = col[0] + ":" + col[1]
-            if pos not in pos_beta_value:
-                continue
-
-            beta = pos_beta_value[pos]
-            info = {c.split("=")[0]: c.split("=")[-1] for c in col[7].split(";") if "=" in c}
-            out = col[:5] + [info["AF"], beta]  # [CHROM, POS, ID, REF, ALT, AF, Beta]
-
-            ind_format = {name: i for i, name in enumerate(col[8].split(":"))}
-            if ("GT" not in ind_format) or ("GP" not in ind_format):
-                raise ValueError("[ERROR]VCF ERROR: GT or GP not in FORMAT.")
-
-            for m, c in mother_child_idx:
-                if ("|" not in col[m] and "." not in col[m]) or ("|" not in col[c] and "." not in col[c]):
-                    raise ValueError("[ERORR] The VCF file must be phased. %s, %s" % (col[m], col[c]))
-
-                mg, cg, m1, m2, c2 = calcute_variant_score(col[m], col[c], format=ind_format)
-                if mg is None:
-                    out.append(":".join(["."] * 5))
-                else:
-                    out.append(":".join(map(str, [mg, cg, m1, m2, c2])))
-
-            print("%s" % "\t".join(map(str, out)))
-
-
 def distinguish_allele(maternal_GT, child_GT):
     if (sum(maternal_GT) == 2 and sum(child_GT) == 0) or (sum(maternal_GT) == 0 and sum(child_GT) == 2):
         # Mendelian error
@@ -349,9 +242,9 @@ def phenotype_concat(in_prs_fn, in_pheno_file):
                 continue
 
             col = line.strip().split()
-            for i in range(len(col)):
-                if col[i] == "-9" or col[i] == "-9.0":
-                    col[i] = "NA"
+            # for i in range(len(col)):
+            #     if col[i] == "-9" or col[i] == "-9.0":
+            #         col[i] = "NA"
 
             sample_id = col[0]
             if sample_id in gs_data:
@@ -380,8 +273,6 @@ def mendelian_randomization(data, y_name, x_names, covar_names):
                  2: "Pvalue",
                  3: "Zscore"}).sort_values(by=["Pvalue"], inplace=False)
 
-    print(model.summary())
-    print(fe)
     return model, fe
 
 
