@@ -152,7 +152,7 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, child_mother_pairs):
                 beta = -1.0 * beta
 
             info = {c.split("=")[0]: c.split("=")[-1] for c in col[7].split(";") if "=" in c}
-            af = float(info["AF"])
+            af = float(info["AF"])  # ALT allele frequency
 
             ind_format = {name: i for i, name in enumerate(col[8].split(":"))}
             if ("GT" not in ind_format) or ("GP" not in ind_format):
@@ -209,10 +209,10 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, child_mother_pairs):
     return
 
 
-def phenotype_concat(in_prs_fn, in_pheno_file):
+def phenotype_concat(in_gs_fn, in_pheno_file):
     gs_data = {}
     header = []
-    with open(in_prs_fn, "rt") as I:
+    with open(in_gs_fn, "rt") as I:
         """
         #Sample_G1	Sample_G2	maternal_genotype_score	child_genotype_score	M1(C1)	M2	C2
         00113051204M47BFF2	13120631BFF2	-18.16394	-18.3755	-10.6309	0.000978	-10.5710
