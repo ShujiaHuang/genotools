@@ -77,7 +77,7 @@ def distinguish_allele(maternal_GT, child_GT):
         h3 = 0 if sum(child_GT) == 0 else 1
 
     elif sum(maternal_GT) == 1:  # 01 or 10
-        if sum(child_GT) == 0:   # could only be 0 or 2
+        if sum(child_GT) == 0:  # could only be 0 or 2
             h1, h2, h3 = 0, 1, 0
         elif sum(child_GT) == 2:
             h1, h2, h3 = 1, 0, 1
@@ -92,6 +92,152 @@ def distinguish_allele(maternal_GT, child_GT):
         raise ValueError("[ERROR] Maternal genotype error!")
 
     return h1, h2, h3
+
+
+def offspring_genotype_origin(data, mother_child_idx, index2sample):
+    ind_format = {name: i for i, name in enumerate(data[0][8].split(":"))}
+    if "GT" not in ind_format:
+        raise ValueError("[ERROR] VCF ERROR: GT is not in FORMAT.")
+
+    paternal_allele_origin = {}  # key value is the array index of child in VCF
+    for d in data:
+        for m, c in mother_child_idx:
+            mother = d[m].split(":")
+            child = d[c].split(":")
+
+            if ("." in mother) or ("." in child):
+                continue
+
+            if ("/" in mother[ind_format["GT"]]) or ("/" in child[ind_format["GT"]]):
+                raise ValueError("[ERORR] Unphased sample: %s or %s. Detail: %s" % (
+                    index2sample[m], index2sample[c], "\t".join(d[:7] + [d[m], d[c]])))
+
+            # Genotype should be: ["0", "0"], ["0", "1"], ["1", "0"] or ["1", "1"]
+            mother_gt = mother[ind_format["GT"]].split("|")
+            child_gt = child[ind_format["GT"]].split("|")
+
+            mother_gt_sum = sum(map(int, mother_gt))  # should be: 0, 1, or 2
+            child_gt_sum = sum(map(int, child_gt))  # should be: 0, 1, or 2
+
+            if c not in paternal_allele_origin:
+                # Key value is the index of child individual in VCF line.
+                paternal_allele_origin[c] = [0, False]  # [genotype_index, is_het_original]
+
+            if (mother_gt_sum == 1 and child_gt_sum == 1) or paternal_allele_origin[c][1]:
+                continue
+
+            if mother_gt_sum == 0 and child_gt_sum == 0:  # MOM: 0|0, KID: 0|0
+                paternal_allele_origin[c] = [0, False]
+            elif mother_gt_sum == 0 and child_gt_sum == 1:  # MOM: 0|0, KID: 0|1 or 1|0
+                # If first allele is the maternal allele, the second one could only be the paternal allele
+                paternal_allele_origin[c] = [0, True] if child_gt[0] == "1" else [1, True]
+
+            elif mother_gt_sum == 1 and (child_gt_sum == 0 or child_gt_sum == 2):  # MOM: 0|1 or 1|0, KID: 0|0, 1|1
+                paternal_allele_origin[c] = [0, False]
+
+            elif mother_gt_sum == 2 and child_gt_sum == 1:  # MOM: 1|1, KID: (0|1 or 1|0)
+                paternal_allele_origin[c] = [0, True] if child_gt[0] == "0" else [1, True]
+            elif mother_gt_sum == 2 and child_gt_sum == 2:
+                paternal_allele_origin[c] = [0, False]
+            else:
+                raise ValueError("[ERROR] Genotype match failed: mother (%s) and child (%s)." % (d[m], d[c]))
+
+    return paternal_allele_origin
+
+
+def output_origin_phased(data, paternal_allele_origin):
+    ind_format = {name: i for i, name in enumerate(data[0][8].split(":"))}
+    for d in data:
+
+        for k, c in paternal_allele_origin.items():
+            ind_info = d[k].split(":")  # 0|0:0:1,0,0
+            gt = ind_info[ind_format["GT"]].split("|")
+
+            # new GT
+            ind_info[ind_format["GT"]] = "|".join([gt[c[0]], gt[1 - c[0]]])
+            d[k] = ":".join(ind_info)
+
+        print("%s" % "\t".join(d))
+
+    return
+
+
+def determine_variant_parent_origin(in_vcf_fn, child_mother_pairs, window=10000):
+    """Transform the phased Child genotype from 'Haplotype-Block-A|Haplotype-Block-B'
+    to 'Paternal-Haplotype|Maternal-Haplotype'. In a case:
+
+    KID DAD MOM
+    0|1 1|1 0|0
+
+    Transform to be:
+
+    KID DAD MOM
+    1|0 1|1 0|0
+
+    :param in_vcf_fn:
+    :param child_mother_pairs:
+    :param window: The size of phasing block in Beagle.
+    :return:
+    """
+    sample2index, index2sample = {}, {}
+    mother_child_idx = []
+    n = 0
+    buffer = []
+    prewindow = {}
+    with gzip.open(in_vcf_fn, "rt") if in_vcf_fn.endswith(".gz") else open(in_vcf_fn, "rt") as IN:
+        # VCF file
+        for line in IN:
+            if line.startswith("##"):
+                print(line.strip())
+                continue
+
+            col = line.strip().split()
+            if line.startswith("#CHROM"):
+                print(line.strip())
+                for i in range(9, len(col)):  # load sample ID and the index of sample
+                    sample2index[col[i]] = i
+                    index2sample[i] = col[i]
+
+                for i in range(9, len(col)):
+                    sample_id = col[i]
+                    if sample_id in child_mother_pairs:
+                        mother, child = child_mother_pairs[sample_id]
+                        if (mother not in sample2index) or (child not in sample2index):
+                            raise ValueError("[ERROR] %s or %s not in VCF" % (mother, child))
+
+                        mother_child_idx.append([sample2index[mother], sample2index[child]])
+                continue
+
+            n += 1
+            if n % 100000 == 0:
+                elapse_time = datetime.now() - START_TIME
+                sys.stderr.write("[INFO] Processing %d records done, %d seconds elapsed\n" % (n, elapse_time.seconds))
+
+            if "," in col[4]:  # ignore multi-allelic
+                continue
+
+            chrom, pos = col[0], int(col[1])
+            window_num = pos // window   # The Phased window or block
+            if chrom not in prewindow:
+                prewindow[chrom] = window_num
+
+            if len(buffer) and (buffer[0][0] != chrom or prewindow[chrom] != window_num):
+                paternal_allele_origin_idx = offspring_genotype_origin(buffer, mother_child_idx, index2sample)
+                output_origin_phased(buffer, paternal_allele_origin_idx)
+
+                buffer = []  # clear the record
+                prewindow[chrom] = window_num  # reset window
+
+            buffer.append(col)  # each row is one line of VCF record
+
+        if len(buffer):
+            paternal_allele_origin_idx = offspring_genotype_origin(buffer, mother_child_idx, index2sample)
+            output_origin_phased(buffer, paternal_allele_origin_idx)
+
+    elapse_time = datetime.now() - START_TIME
+    sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapse_time.seconds))
+
+    return
 
 
 def calculate_genetic_score(in_vcf_fn, pos_beta_value, child_mother_pairs):
@@ -280,6 +426,16 @@ if __name__ == "__main__":
     cmd_parser = argparse.ArgumentParser(description="Usage: ")
     commands = cmd_parser.add_subparsers(dest="command", title="Commands")
 
+    tc_cmd = commands.add_parser("TTC", help="Transform the phased genotype of child from "
+                                             "'Haplotype-Block-A|Haplotype-Block-B' to "
+                                             "'Paternal-Haplotype|Maternal-Haplotype'.")
+    tc_cmd.add_argument("-I", "--target", dest="target", type=str, required=True,
+                        help="Input a phased VCF. Required.")
+    tc_cmd.add_argument("-w", "--window", dest="window", type=int, default=10000, required=False,
+                        help="The phased block size. [10000]")
+    tc_cmd.add_argument("--fam", dest="fam", type=str, required=True,
+                        help="Input a .fam file with mother and children.")
+
     gs_cmd = commands.add_parser("GeneticScore", help="Calculate Genetic score")
     gs_cmd.add_argument("-I", "--target", dest="target", type=str, required=True,
                         help="Input VCF. Required.")
@@ -308,7 +464,11 @@ if __name__ == "__main__":
 
     args = cmd_parser.parse_args()
 
-    if args.command == "GeneticScore":
+    if args.command == "TTC":
+        child_mother_pairs = get_child_mother_duos(args.fam)
+        determine_variant_parent_origin(args.target, child_mother_pairs, window=args.window)
+
+    elif args.command == "GeneticScore":
         child_mother_pairs = get_child_mother_duos(args.fam)
         beta_value = get_beta_value(args.base)
         calculate_genetic_score(args.target, beta_value, child_mother_pairs)
