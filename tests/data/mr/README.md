@@ -4,3 +4,4 @@ python ../../../genotools/mr.py TTC -I test2.vcf.gz --fam test.fam| awk '$1!~/^#
 python ../../../genotools/mr.py PRS -I test.vcf.gz --betavaluefile test.gwas.beta.tsv --famfile test.fam > tt
 python ../../../genotools/mr.py TTC -I test2.vcf.gz --fam test.fam > t.p.vcf
 ```
+python ../../../genotools/mr.py Split -I test2.vcf.gz --fam test.fam --dosage 
