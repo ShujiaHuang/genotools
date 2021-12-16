@@ -43,22 +43,43 @@ def get_child_mother_duos(fname):
     child_mother_pairs = {}
     with gzip.open(fname, "rt") if fname.endswith(".gz") else open(fname, "rt") as IN:
         """
-        #Family IID FID MID Gender Phenotype
+        #Family IID FID MID Sex Phenotype
         6596178	16101233BFF2	0	00116011243M27BFF2	2	-9
         4459907	17200664BFF2	0	00116101038M15BFF2	1	-9
+        2052894 16100773BFF2    00115111159F00BFF2      00115111159M22BFF2      2       -9
         """
         for line in IN:
             if line.startswith("#"):
                 continue
 
             col = line.strip().split()
-            child, mother = col[1], col[3]
-            if mother == "0":  # Only get child-mother pairs.
+            ind_id, fid, mid = col[1], col[2], col[3]
+            if mid == "0":  # Only get child-mother pairs.
                 continue
 
-            child_mother_pairs[child] = [mother, child]
+            child_mother_pairs[ind_id] = [mid, ind_id]
 
     return child_mother_pairs
+
+
+def load_fam_data(fname):
+    fam = {}
+    with gzip.open(fname, "rt") if fname.endswith(".gz") else open(fname, "rt") as IN:
+        """
+        #Family IID FID MID Sex Phenotype
+        6596178	16101233BFF2	0	00116011243M27BFF2	2	-9
+        4459907	17200664BFF2	0	00116101038M15BFF2	1	-9
+        2052894 16100773BFF2    00115111159F00BFF2      00115111159M22BFF2      2       -9
+        """
+        for line in IN:
+            if line.startswith("#"):
+                continue
+
+            col = line.strip().split()
+            sid, fid, mid = col[1], col[2], col[3]
+            fam[sid] = [sid, fid, mid]
+
+    return fam
 
 
 def distinguish_allele(maternal_GT, child_GT):
@@ -71,7 +92,6 @@ def distinguish_allele(maternal_GT, child_GT):
         # can not distinguish the maternal allele
         return None, None, None
 
-    h1, h2, h3 = None, None, None
     if sum(maternal_GT) == 0:
         h1, h2 = 0, 0
         h3 = 0 if sum(child_GT) == 0 else 1
@@ -94,61 +114,192 @@ def distinguish_allele(maternal_GT, child_GT):
     return h1, h2, h3
 
 
-def offspring_genotype_origin(data, mother_child_idx, index2sample):
+def paternal_allele_origin_by_duo(sample_gt, parent_gt, is_paternal_gt=False):
+    """Determine the paternal allele index in `sample_gt` by parent-offspring duos.
+
+    :param sample_gt: The genotype of sample
+    :param parent_gt: The genotype of paternal or maternal
+    :param is_paternal_gt: The `parent_gt` is from paternal. default: False
+    :return:
+    """
+    # Default value
+    is_error_genotype_match = False
+    paternal_allele_origin = [0, False]  # [paternal_genotype_index, is_clear_origin]
+
+    # Genotype should be: ["0", "0"], ["0", "1"], ["1", "0"] or ["1", "1"]
+    s_gt = sample_gt.split("|")
+    p_gt = parent_gt.split("|")
+
+    s_gt_sum = sum(map(int, s_gt))  # should be: 0, 1, or 2
+    p_gt_sum = sum(map(int, p_gt))  # should be: 0, 1, or 2
+
+    if s_gt_sum == 1 and p_gt_sum == 1:
+        return is_error_genotype_match, paternal_allele_origin
+
+    if p_gt_sum == 0 and s_gt_sum == 0:  # MOM/DAD: 0|0, KID: 0|0
+        paternal_allele_origin = [0, False]
+
+    elif p_gt_sum == 0 and s_gt_sum == 1:  # MOM/DAD: 0|0, KID: 0|1 or 1|0
+        if is_paternal_gt:
+            paternal_allele_origin = [0, True] if s_gt[0] == "0" else [1, True]
+        else:
+            # If first allele is the maternal allele, the second one could only be paternal
+            paternal_allele_origin = [0, True] if s_gt[0] == "1" else [1, True]
+
+    elif p_gt_sum == 1 and (s_gt_sum == 0 or s_gt_sum == 2):  # MOM/DAD: 0|1 or 1|0, KID: 0|0, 1|1
+        paternal_allele_origin = [0, False]
+
+    elif p_gt_sum == 2 and s_gt_sum == 1:  # MOM/DAD: 1|1, KID: (0|1 or 1|0)
+        if is_paternal_gt:
+            paternal_allele_origin = [0, True] if s_gt[0] == "1" else [1, True]
+        else:
+            paternal_allele_origin = [0, True] if s_gt[0] == "0" else [1, True]
+
+    elif p_gt_sum == 2 and s_gt_sum == 2:  # MOM/DAD: 1|1, KID: 1|1
+        paternal_allele_origin = [0, False]
+
+    else:
+        is_error_genotype_match = True  # probably hit HWE
+
+    return is_error_genotype_match, paternal_allele_origin
+
+
+def paternal_allele_origin_by_trio(sample_gt, father_gt, mother_gt):
+    """Determine the paternal allele index in `sample_gt` by parent-offspring duos.
+
+    :param sample_gt: The genotype of sample
+    :param father_gt: The genotype of paternal
+    :param mother_gt: The genotype of maternal
+    """
+    # Default value
+    is_error_genotype_match = False
+    paternal_allele_origin = [0, False]  # [paternal_genotype_index, is_clear_origin]
+
+    # Genotype should be: ["0", "0"], ["0", "1"], ["1", "0"] or ["1", "1"]
+    s_gt = sample_gt.split("|")
+    f_gt = father_gt.split("|")
+    m_gt = mother_gt.split("|")
+
+    s_gt_sum = sum(map(int, s_gt))  # should be: 0, 1, or 2
+    f_gt_sum = sum(map(int, f_gt))  # should be: 0, 1, or 2
+    m_gt_sum = sum(map(int, m_gt))  # should be: 0, 1, or 2
+
+    if s_gt_sum == 1 and f_gt_sum == 1 and m_gt_sum == 1:  # 0|1, 0|1, 0|1
+        return is_error_genotype_match, paternal_allele_origin
+
+    if s_gt_sum == 0:
+        if f_gt_sum != 2 or m_gt_sum != 2:
+            paternal_allele_origin = [0, False]
+        else:
+            # DAD: 1|1 or MOM: 1|1 => impossible
+            is_error_genotype_match = True
+
+    elif s_gt_sum == 1:  # KID: 0|1 or 1|0
+        if f_gt_sum == 0 and (m_gt_sum == 1 or m_gt_sum == 2):  # DAD: 0|0, MOM: 0|1 or 1|0 or 1|1
+            paternal_allele_origin = [0, True] if s_gt[0] == "0" else [1, True]
+
+        elif f_gt_sum == 1 and m_gt_sum == 0:  # DAD: 0|1 or 1|0, MOM: 0|0
+            paternal_allele_origin = [0, True] if s_gt[0] == "1" else [1, True]
+
+        elif f_gt_sum == 1 and m_gt_sum == 1:  # DAD: 0|1 or 1|0, MOM: 0|1 or 1|0
+            pass  # has returned the default value
+
+        elif f_gt_sum == 1 and m_gt_sum == 2:  # DAD: 0|1 or 1|0, MOM: 1|1
+            paternal_allele_origin = [0, True] if s_gt[0] == "0" else [1, True]
+
+        elif f_gt_sum == 2 and (m_gt_sum == 0 or m_gt_sum == 1):  # DAD: 1|1, MOM: 0|0 or 0|1 or 1|0
+            paternal_allele_origin = [0, True] if s_gt[0] == "1" else [1, True]
+
+        else:  # (0|0, 0|0), (1|1, 1|1)
+            is_error_genotype_match = True
+
+    else:  # KID: 1|1
+        if f_gt_sum != 0 and m_gt_sum != 0:  # DAD: 0|1 or 1|1, MOM: 0|1 or 1|1
+            paternal_allele_origin = [0, False]
+
+        else:  # DAD == 0|0 or MOM == 0|0
+            is_error_genotype_match = True
+
+    return is_error_genotype_match, paternal_allele_origin
+
+
+def offspring_genotype_origin(data, fam_idx, index2sample):
     ind_format = {name: i for i, name in enumerate(data[0][8].split(":"))}
     if "GT" not in ind_format:
         raise ValueError("[ERROR] VCF ERROR: GT is not in FORMAT.")
 
     paternal_allele_origin = {}  # key value is the array index of child in VCF
     for d in data:
-        for m, c in mother_child_idx:
-            mother = d[m].split(":")
+        for c, f, m in fam_idx:  # [KID, DAD, MOM]
+            father = d[f].split(":") if f is not None else None
+            mother = d[m].split(":") if m is not None else None
             child = d[c].split(":")
 
-            if ("." in mother) or ("." in child):
+            if (("." in child[ind_format["GT"]]) or
+                    (father and "." in father[ind_format["GT"]]) or
+                    (mother and "." in mother[ind_format["GT"]])):
+                # contain missing genotype, ignore
                 continue
 
-            if ("/" in mother[ind_format["GT"]]) or ("/" in child[ind_format["GT"]]):
-                raise ValueError("[ERORR] Unphased sample: %s or %s. Detail: %s" % (
-                    index2sample[m], index2sample[c], "\t".join(d[:7] + [d[m], d[c]])))
+            if (("/" in child[ind_format["GT"]]) or
+                    (father and "/" in father[ind_format["GT"]]) or
+                    (mother and "/" in mother[ind_format["GT"]])):
+                raise ValueError("[ERORR] Unphased sample: %s, %s or %s. Detail: %s" % (
+                    index2sample[f] if f is not None else "",
+                    index2sample[m] if m is not None else "",
+                    index2sample[c],
+                    "\t".join(d[:7] + [d[f] if f is not None else "-",
+                                       d[m] if m is not None else "-",
+                                       d[c]])))
 
-            # Genotype should be: ["0", "0"], ["0", "1"], ["1", "0"] or ["1", "1"]
-            mother_gt = mother[ind_format["GT"]].split("|")
-            child_gt = child[ind_format["GT"]].split("|")
-
-            mother_gt_sum = sum(map(int, mother_gt))  # should be: 0, 1, or 2
-            child_gt_sum = sum(map(int, child_gt))  # should be: 0, 1, or 2
+            # Genotype should be: "0|0", "0|1", "1|0" or "1|1"
+            father_gt = father[ind_format["GT"]] if father else None
+            mother_gt = mother[ind_format["GT"]] if mother else None
+            child_gt = child[ind_format["GT"]]
 
             if c not in paternal_allele_origin:
-                # Key value is the index of child individual in VCF line.
-                paternal_allele_origin[c] = [0, False]  # [genotype_index, is_het_original]
+                # Key value is the index of child individual in VCF line. [genotype_index, is_clear_origin]
+                is_error_genotype_match, paternal_allele_origin[c] = False, [0, False]
 
-            if (mother_gt_sum == 1 and child_gt_sum == 1) or paternal_allele_origin[c][1]:
+            if paternal_allele_origin[c][1]:
                 continue
 
-            if mother_gt_sum == 0 and child_gt_sum == 0:  # MOM: 0|0, KID: 0|0
-                paternal_allele_origin[c] = [0, False]
-            elif mother_gt_sum == 0 and child_gt_sum == 1:  # MOM: 0|0, KID: 0|1 or 1|0
-                # If first allele is the maternal allele, the second one could only be the paternal allele
-                paternal_allele_origin[c] = [0, True] if child_gt[0] == "1" else [1, True]
-
-            elif mother_gt_sum == 1 and (child_gt_sum == 0 or child_gt_sum == 2):  # MOM: 0|1 or 1|0, KID: 0|0, 1|1
-                paternal_allele_origin[c] = [0, False]
-
-            elif mother_gt_sum == 2 and child_gt_sum == 1:  # MOM: 1|1, KID: (0|1 or 1|0)
-                paternal_allele_origin[c] = [0, True] if child_gt[0] == "0" else [1, True]
-            elif mother_gt_sum == 2 and child_gt_sum == 2:
-                paternal_allele_origin[c] = [0, False]
+            # Key value is the index of child individual in VCF line. [genotype_index, is_clear_origin]
+            if father_gt is None or mother_gt is None:
+                # duo
+                if mother_gt:
+                    is_error_genotype_match, paternal_allele_origin[c] = paternal_allele_origin_by_duo(
+                        child_gt, mother_gt, is_paternal_gt=False)
+                elif father_gt:
+                    is_error_genotype_match, paternal_allele_origin[c] = paternal_allele_origin_by_duo(
+                        child_gt, father_gt, is_paternal_gt=True)
+                else:
+                    # Single individual
+                    is_error_genotype_match, paternal_allele_origin[c] = False, [0, False]
             else:
-                raise ValueError("[ERROR] Genotype match failed: mother (%s) and child (%s)." % (d[m], d[c]))
+                # Trio
+                is_error_genotype_match, paternal_allele_origin[c] = paternal_allele_origin_by_trio(
+                    child_gt, father_gt, mother_gt)
 
+            if is_error_genotype_match:
+                paternal_allele_origin[c] = [0, False]
+                sys.stderr.write("[ERROR] Genotype match failed but still set original and "
+                                 "continue: %s \t(father: %s, %s), (mother: %s, %s) and "
+                                 "(child: %s, %s).\n" % (
+                                     "\t".join(d[0:5]),
+                                     index2sample[f] if f is not None else "-",
+                                     d[f] if f is not None else "-",
+                                     index2sample[m] if m is not None else "-",
+                                     d[m] if m is not None else "-",
+                                     index2sample[c],
+                                     d[c])
+                                 )
     return paternal_allele_origin
 
 
 def output_origin_phased(data, paternal_allele_origin):
     ind_format = {name: i for i, name in enumerate(data[0][8].split(":"))}
     for d in data:
-
         for k, c in paternal_allele_origin.items():
             ind_info = d[k].split(":")  # 0|0:0:1,0,0
             gt = ind_info[ind_format["GT"]].split("|")
@@ -162,7 +313,7 @@ def output_origin_phased(data, paternal_allele_origin):
     return
 
 
-def determine_variant_parent_origin(in_vcf_fn, child_mother_pairs, window=10000):
+def determine_variant_parent_origin(in_vcf_fn, fam, window=10000):
     """Transform the phased Child genotype from 'Haplotype-Block-A|Haplotype-Block-B'
     to 'Paternal-Haplotype|Maternal-Haplotype'. In a case:
 
@@ -180,9 +331,9 @@ def determine_variant_parent_origin(in_vcf_fn, child_mother_pairs, window=10000)
     :return:
     """
     sample2index, index2sample = {}, {}
-    mother_child_idx = []
+    fam_idx = []
     n = 0
-    buffer = []
+    data_buffer = []
     prewindow = {}
     with gzip.open(in_vcf_fn, "rt") if in_vcf_fn.endswith(".gz") else open(in_vcf_fn, "rt") as IN:
         # VCF file
@@ -200,12 +351,14 @@ def determine_variant_parent_origin(in_vcf_fn, child_mother_pairs, window=10000)
 
                 for i in range(9, len(col)):
                     sample_id = col[i]
-                    if sample_id in child_mother_pairs:
-                        mother, child = child_mother_pairs[sample_id]
-                        if (mother not in sample2index) or (child not in sample2index):
-                            raise ValueError("[ERROR] %s or %s not in VCF" % (mother, child))
+                    if sample_id in fam:
+                        sid, fid, mid = fam[sample_id]
+                        if (fid != "0" and fid not in sample2index) or (mid != "0" and mid not in sample2index):
+                            raise ValueError("[ERROR] %s or %s not in VCF" % (fid, mid))
 
-                        mother_child_idx.append([sample2index[mother], sample2index[child]])
+                        fam_idx.append([sample2index[sid],
+                                        sample2index[fid] if fid != "0" else None,
+                                        sample2index[mid] if mid != "0" else None])
                 continue
 
             n += 1
@@ -217,22 +370,22 @@ def determine_variant_parent_origin(in_vcf_fn, child_mother_pairs, window=10000)
                 continue
 
             chrom, pos = col[0], int(col[1])
-            window_num = pos // window   # The Phased window or block
+            window_num = pos // window  # The Phased window or block
             if chrom not in prewindow:
                 prewindow[chrom] = window_num
 
-            if len(buffer) and (buffer[0][0] != chrom or prewindow[chrom] != window_num):
-                paternal_allele_origin_idx = offspring_genotype_origin(buffer, mother_child_idx, index2sample)
-                output_origin_phased(buffer, paternal_allele_origin_idx)
+            if len(data_buffer) and (prewindow[chrom] != window_num or data_buffer[0][0] != chrom):
+                paternal_allele_origin_idx = offspring_genotype_origin(data_buffer, fam_idx, index2sample)
+                output_origin_phased(data_buffer, paternal_allele_origin_idx)
 
-                buffer = []  # clear the record
+                data_buffer = []  # clear record
                 prewindow[chrom] = window_num  # reset window
 
-            buffer.append(col)  # each row is one line of VCF record
+            data_buffer.append(col)  # each row is one line of VCF record
 
-        if len(buffer):
-            paternal_allele_origin_idx = offspring_genotype_origin(buffer, mother_child_idx, index2sample)
-            output_origin_phased(buffer, paternal_allele_origin_idx)
+        if len(data_buffer):
+            paternal_allele_origin_idx = offspring_genotype_origin(data_buffer, fam_idx, index2sample)
+            output_origin_phased(data_buffer, paternal_allele_origin_idx)
 
     elapse_time = datetime.now() - START_TIME
     sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapse_time.seconds))
@@ -465,8 +618,8 @@ if __name__ == "__main__":
     args = cmd_parser.parse_args()
 
     if args.command == "TTC":
-        child_mother_pairs = get_child_mother_duos(args.fam)
-        determine_variant_parent_origin(args.target, child_mother_pairs, window=args.window)
+        fam_data = load_fam_data(args.fam)
+        determine_variant_parent_origin(args.target, fam_data, window=args.window)
 
     elif args.command == "GeneticScore":
         child_mother_pairs = get_child_mother_duos(args.fam)
