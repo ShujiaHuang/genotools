@@ -39,27 +39,27 @@ def get_beta_value(fname):
     return beta
 
 
-def load_mother_child_pairs(fname):
-    child_mother_pairs = {}
-    with gzip.open(fname, "rt") if fname.endswith(".gz") else open(fname, "rt") as IN:
-        """
-        #Family IID FID MID Sex Phenotype
-        6596178	16101233BFF2	0	0	2	-9
-        4459907	17200664BFF2	0	00116101038M15BFF2	1	-9
-        2052894 16100773BFF2    00115111159F00BFF2      00115111159M22BFF2      2       -9
-        """
-        for line in IN:
-            if line.startswith("#"):
-                continue
-
-            col = line.strip().split()
-            sid, mid = col[1], col[3]
-            if mid == "0":  # Only get child-mother pairs.
-                continue
-
-            child_mother_pairs[sid] = [sid, mid]
-
-    return child_mother_pairs
+# def load_mother_child_pairs(fname):
+#     child_mother_pairs = {}
+#     with gzip.open(fname, "rt") if fname.endswith(".gz") else open(fname, "rt") as IN:
+#         """
+#         #Family IID FID MID Sex Phenotype
+#         6596178	16101233BFF2	0	0	2	-9
+#         4459907	17200664BFF2	0	00116101038M15BFF2	1	-9
+#         2052894 16100773BFF2    00115111159F00BFF2      00115111159M22BFF2      2       -9
+#         """
+#         for line in IN:
+#             if line.startswith("#"):
+#                 continue
+#
+#             col = line.strip().split()
+#             sid, mid = col[1], col[3]
+#             if mid == "0":  # Only get child-mother pairs.
+#                 continue
+#
+#             child_mother_pairs[sid] = [sid, mid]
+#
+#     return child_mother_pairs
 
 
 def load_fam_data(fname):
@@ -392,7 +392,7 @@ def determine_variant_parent_origin(in_vcf_fn, fam, window=10000):
     return
 
 
-def split(in_vcf_fn, child_mother_pairs, is_dosage=False):
+def split(in_vcf_fn, fam, is_dosage=False):
     sample2index, index2sample = {}, {}
     child_mother_idx = []
     data = {}
@@ -410,12 +410,15 @@ def split(in_vcf_fn, child_mother_pairs, is_dosage=False):
 
                 for i in range(9, len(col)):
                     sample_id = col[i]
-                    if sample_id in child_mother_pairs:
-                        child, mother = child_mother_pairs[sample_id]
-                        if (mother not in sample2index) or (child not in sample2index):
-                            raise ValueError("[ERROR] %s or %s not in VCF" % (mother, child))
+                    if sample_id in fam:
+                        sid, _, mid = fam[sample_id]
+                        if mid == "0":  # only use mother-pair samples
+                            continue
 
-                        child_mother_idx.append([sample2index[child], sample2index[mother]])
+                        if (mid not in sample2index) or (sid not in sample2index):
+                            raise ValueError("[ERROR] %s or %s not in VCF" % (mid, sid))
+
+                        child_mother_idx.append([sample2index[sid], sample2index[mid]])
 
                 continue
 
@@ -495,7 +498,7 @@ def split(in_vcf_fn, child_mother_pairs, is_dosage=False):
     return
 
 
-def calculate_genetic_score(in_vcf_fn, pos_beta_value, child_mother_pairs, is_dosage=False):
+def calculate_genetic_score(in_vcf_fn, pos_beta_value, fam, is_dosage=False):
     sample2index, index2sample = {}, {}
     gs, af_beta = {}, {}
     mother_child_idx = []
@@ -514,14 +517,20 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, child_mother_pairs, is_do
 
                 for i in range(9, len(col)):
                     sample_id = col[i]
-                    if sample_id in child_mother_pairs:
-                        child, mother = child_mother_pairs[sample_id]
-                        if (mother not in sample2index) or (child not in sample2index):
-                            raise ValueError("[ERROR] %s or %s not in VCF" % (mother, child))
+                    if sample_id in fam:
+                        sid, fid, mid = fam[sample_id]
+                        if mid == "0":  # only use mother-pair samples
+                            continue
 
-                        k = mother + "_" + child
+                        if (mid not in sample2index) or (sid not in sample2index):
+                            raise ValueError("[ERROR] %s or %s not in VCF" % (mid, sid))
+
+                        k = mid + "_" + sid  # mother-child
                         gs[k], af_beta[k] = [], []
-                        mother_child_idx.append([sample2index[mother], sample2index[child]])
+
+                        is_trio = True if (fid != "0" and mid != "0") else False
+                        mother_child_idx.append([sample2index[mid], sample2index[sid], is_trio])
+
                 continue
 
             n += 1
@@ -559,7 +568,7 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, child_mother_pairs, is_do
             if ("GT" not in ind_format) or ("GP" not in ind_format):
                 raise ValueError("[ERROR]VCF ERROR: GT or GP not in FORMAT.")
 
-            for m, c in mother_child_idx:
+            for m, c, is_duo in mother_child_idx:
                 # Genotype should be: [0, 0], [0, 1], [1, 0] or [1, 1]
                 # `child_gt` is in "paternal_hap|maternal_hap" format after "TTC" process, so
                 # `child_gt[0]` is paternal allele and `child_gt[1]` is maternal allele.
@@ -572,6 +581,11 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, child_mother_pairs, is_do
 
                 if (sum(mother_gt) == 0 and sum(child_gt) == 2) or (sum(mother_gt) == 2 and sum(child_gt) == 0):
                     # Mendelian error
+                    continue
+
+                is_duo = not is_trio
+                if is_duo and (sum(mother_gt) == 1) and (sum(child_gt) == 1):  # 0,1 => 0,1
+                    # can not distinguish the maternal allele
                     continue
 
                 # `h1`: maternal transmitted allele/dosage
@@ -613,7 +627,7 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, child_mother_pairs, is_do
 
     # Calculate the PRS for each type of allele
     print("#Mother\tChild\tmaternal_genotype_score\tchild_genotype_score\th1\th2\th3\tsite_number")
-    for m, c in mother_child_idx:
+    for m, c, _ in mother_child_idx:
         k = index2sample[m] + "_" + index2sample[c]
         genetic_score = np.mean(gs[k], axis=0)  # Average
         print("%s\t%s\t%s\t%d" % (index2sample[m], index2sample[c], "\t".join(map(str, genetic_score)), len(gs[k])))
@@ -701,8 +715,8 @@ if __name__ == "__main__":
     tc_cmd.add_argument("--fam", dest="fam", type=str, required=True,
                         help="Input a .fam file with mother and children.")
 
-    ss_cmd = commands.add_parser("Split", help="Split the child genotype according to the original of "
-                                               "parent VCF (by ``TTC``).")
+    ss_cmd = commands.add_parser("Split", help="Split the individual genotype according to the "
+                                               "original of parent VCF (by ``TTC``).")
     ss_cmd.add_argument("-I", "--target", dest="target", type=str, required=True,
                         help="Input a phased VCF. Required.")
     ss_cmd.add_argument("--fam", dest="fam", type=str, required=True,
@@ -743,13 +757,13 @@ if __name__ == "__main__":
         determine_variant_parent_origin(args.target, fam_data, window=args.window)
 
     elif args.command == "Split":
-        child_mother_pairs = load_mother_child_pairs(args.fam)
-        split(args.target, child_mother_pairs, is_dosage=args.dosage)
+        fam_data = load_fam_data(args.fam)
+        split(args.target, fam_data, is_dosage=args.dosage)
 
     elif args.command == "GeneticScore":
-        child_mother_pairs = load_mother_child_pairs(args.fam)
+        fam_data = load_fam_data(args.fam)
         beta_value = get_beta_value(args.base)
-        calculate_genetic_score(args.target, beta_value, child_mother_pairs, is_dosage=args.dosage)
+        calculate_genetic_score(args.target, beta_value, fam_data, is_dosage=args.dosage)
 
     elif args.command == "MR":
         data = pd.read_table(args.input, sep="\t")
