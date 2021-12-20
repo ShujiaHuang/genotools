@@ -39,29 +39,6 @@ def get_beta_value(fname):
     return beta
 
 
-# def load_mother_child_pairs(fname):
-#     child_mother_pairs = {}
-#     with gzip.open(fname, "rt") if fname.endswith(".gz") else open(fname, "rt") as IN:
-#         """
-#         #Family IID FID MID Sex Phenotype
-#         6596178	16101233BFF2	0	0	2	-9
-#         4459907	17200664BFF2	0	00116101038M15BFF2	1	-9
-#         2052894 16100773BFF2    00115111159F00BFF2      00115111159M22BFF2      2       -9
-#         """
-#         for line in IN:
-#             if line.startswith("#"):
-#                 continue
-#
-#             col = line.strip().split()
-#             sid, mid = col[1], col[3]
-#             if mid == "0":  # Only get child-mother pairs.
-#                 continue
-#
-#             child_mother_pairs[sid] = [sid, mid]
-#
-#     return child_mother_pairs
-
-
 def load_fam_data(fname):
     fam = {}
     with gzip.open(fname, "rt") if fname.endswith(".gz") else open(fname, "rt") as IN:
@@ -392,7 +369,7 @@ def determine_variant_parent_origin(in_vcf_fn, fam, window=10000):
     return
 
 
-def split(in_vcf_fn, fam, is_dosage=False):
+def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
     sample2index, index2sample = {}, {}
     child_mother_idx = []
     data = {}
@@ -715,8 +692,8 @@ if __name__ == "__main__":
     tc_cmd.add_argument("--fam", dest="fam", type=str, required=True,
                         help="Input a .fam file with mother and children.")
 
-    ss_cmd = commands.add_parser("Split", help="Split the individual genotype according to the "
-                                               "original of parent VCF (by ``TTC``).")
+    ss_cmd = commands.add_parser("Split", help="Distinguish the parental origin of individual genotype "
+                                               "according to the parent_origin VCF (by ``TTC``).")
     ss_cmd.add_argument("-I", "--target", dest="target", type=str, required=True,
                         help="Input a phased VCF. Required.")
     ss_cmd.add_argument("--fam", dest="fam", type=str, required=True,
@@ -724,7 +701,7 @@ if __name__ == "__main__":
     ss_cmd.add_argument("--dosage", dest="dosage", action="store_true", help="Use dosage.")
 
     gs_cmd = commands.add_parser("GeneticScore", help="Calculate Genetic score according to the "
-                                                      "original of parent VCF (by ``TTC``).")
+                                                      "parent_origin VCF (by ``TTC``).")
     gs_cmd.add_argument("-I", "--target", dest="target", type=str, required=True,
                         help="Input VCF. Required.")
     gs_cmd.add_argument("-b", "--base", dest="base", type=str, required=True,
@@ -733,15 +710,15 @@ if __name__ == "__main__":
                         help="Input a .fam file with mother and children.")
     gs_cmd.add_argument("--dosage", dest="dosage", action="store_true", help="Use dosage.")
 
-    mr_cmd = commands.add_parser("MR", help="Mendelian Randomization")
-    mr_cmd.add_argument("-I", "--input", dest="input", type=str, required=True,
-                        help="Input data file")
-    mr_cmd.add_argument("-x", dest="x_name", type=str, required=True,
-                        help="Load the designated phenotype(s) as x from the '--input'.")
-    mr_cmd.add_argument("--covar", dest="covar_name", type=str, required=True,
-                        help="Only load the designated covariate(s) from the '--input'.")
-    mr_cmd.add_argument("-y", dest="y_name", type=str, required=True,
-                        help="Load the designated data as y from the '--input'.")
+    # mr_cmd = commands.add_parser("MR", help="Mendelian Randomization")
+    # mr_cmd.add_argument("-I", "--input", dest="input", type=str, required=True,
+    #                     help="Input data file")
+    # mr_cmd.add_argument("-x", dest="x_name", type=str, required=True,
+    #                     help="Load the designated phenotype(s) as x from the '--input'.")
+    # mr_cmd.add_argument("--covar", dest="covar_name", type=str, required=True,
+    #                     help="Only load the designated covariate(s) from the '--input'.")
+    # mr_cmd.add_argument("-y", dest="y_name", type=str, required=True,
+    #                     help="Load the designated data as y from the '--input'.")
 
     add_cmd = commands.add_parser("ADD", help="Concat genetic score data together with phenotype data.")
     add_cmd.add_argument("-g", dest="genetic_score", type=str, required=True, help="input genetic score file.")
@@ -758,16 +735,16 @@ if __name__ == "__main__":
 
     elif args.command == "Split":
         fam_data = load_fam_data(args.fam)
-        split(args.target, fam_data, is_dosage=args.dosage)
+        distinguish_origin(args.target, fam_data, is_dosage=args.dosage)
 
     elif args.command == "GeneticScore":
         fam_data = load_fam_data(args.fam)
         beta_value = get_beta_value(args.base)
         calculate_genetic_score(args.target, beta_value, fam_data, is_dosage=args.dosage)
 
-    elif args.command == "MR":
-        data = pd.read_table(args.input, sep="\t")
-        regression(data, args.y_name, args.x_name, args.covar_name)
+    # elif args.command == "MR":
+    #     data = pd.read_table(args.input, sep="\t")
+    #     regression(data, args.y_name, args.x_name, args.covar_name)
 
     elif args.command == "ADD":
         phenotype_concat(args.genetic_score, args.phenotype)
