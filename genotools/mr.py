@@ -587,27 +587,37 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, fam, is_dosage=False):
                 # `s_h3`: paternal (fetal only) transmitted haplotype genetic score
                 # `s_mat`: maternal genotype score
                 # `s_fet`: fetal genotype score
+                # `g_mat`: Maternal genetic effect
+                # `g_fet`: Fetal genetic effect
                 s_h1 = h1 * beta
                 s_h2 = h2 * beta
                 s_h3 = h3 * beta
                 s_mat = mat * beta  # s_h1 + s_h2
                 s_fet = fet * beta  # s_h1 + s_h3
+                g_mat = (s_h1 + s_h2 - s_h3) / 2.0
+                g_fet = (s_h1 + s_h3 - s_h2) / 2.0
 
                 k = index2sample[m] + "_" + index2sample[c]
                 if k not in gs:
                     gs[k] = []
 
-                gs[k].append([s_mat, s_fet, s_h1, s_h2, s_h3])
+                gs[k].append([s_mat, s_fet, g_mat, g_fet, s_h1, s_h2, s_h3])
 
     elapse_time = datetime.now() - START_TIME
     sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapse_time.seconds))
 
     # Calculate the PRS for each type of allele
-    print("#Mother\tChild\tmaternal_genotype_score\tchild_genotype_score\th1\th2\th3\tsite_number")
+    print("#Mother\tChild\tmaternal_genotype_score\tchild_genotype_score\tmaternal_genetic_effect\t"
+          "fetal_genetic_effect\th1\th2\th3\tsite_number")
     for m, c, _ in mother_child_idx:
         k = index2sample[m] + "_" + index2sample[c]
         genetic_score = np.mean(gs[k], axis=0)  # Average
-        print("%s\t%s\t%s\t%d" % (index2sample[m], index2sample[c], "\t".join(map(str, genetic_score)), len(gs[k])))
+        print("%s\t%s\t%s\t%d" % (
+            index2sample[m],
+            index2sample[c],
+            "\t".join(map(str, genetic_score)),
+            len(gs[k]))
+        )
 
     return
 
