@@ -1,5 +1,4 @@
-"""Mendelian randomization
-
+"""
 Author: Shujia Huang
 Date: 2021-05-18 08:32:34
 """
