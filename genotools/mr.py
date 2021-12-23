@@ -733,10 +733,6 @@ if __name__ == "__main__":
     add_cmd.add_argument("-g", dest="genetic_score", type=str, required=True, help="input genetic score file.")
     add_cmd.add_argument("-p", dest="phenotype", type=str, required=True, help="input phenotype data file.")
 
-    if len(sys.argv) < 2:
-        cmd_parser.print_help()
-        sys.exit(1)
-
     args = cmd_parser.parse_args()
     if args.command == "TTC":
         fam_data = load_fam_data(args.fam)
