@@ -544,7 +544,7 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, is_do
             if "GT" not in ind_format:
                 raise ValueError("[ERROR] 'GT' filed is required in VCF for each individual.")
 
-            if is_dosage and (("GP" not in ind_format) and ("DS" not in ind_format)):
+            if is_dosage and ("GP" not in ind_format) and ("DS" not in ind_format):
                 raise ValueError("[ERROR] 'GP' or 'DS' field is required for dosage "
                                  "for each individual.")
 
@@ -677,14 +677,11 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, is_dosage=False):
             if ref_allele == a1:
                 beta = -1.0 * beta
 
-            # info = {c.split("=")[0]: c.split("=")[-1] for c in col[7].split(";") if "=" in c}
-            # af = float(info["AF"])  # ALT allele frequency
-
             ind_format = {name: i for i, name in enumerate(col[8].split(":"))}
             if "GT" not in ind_format:
                 raise ValueError("[ERROR] 'GT' filed is required in VCF for each individual.")
 
-            if is_dosage and (("GP" not in ind_format) and ("DS" not in ind_format)):
+            if is_dosage and ("GP" not in ind_format) and ("DS" not in ind_format):
                 raise ValueError("[ERROR] 'GP' or 'DS' field is required for dosage "
                                  "for each individual.")
 
