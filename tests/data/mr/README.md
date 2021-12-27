@@ -5,4 +5,8 @@ python ../../../genotools/mr.py TTC -I test.vcf.gz --fam test.fam > t.p.vcf
 python ../../../genotools/mr.py Split -I test.vcf.gz --fam test.fam --dosage 
 python ../../../genotools/mr.py GeneticScore -I FPG.vcf.gz -b FPG.beta.txt --fam test.fam
 
+
+python ../../../genotools/mr.py GeneticScore -I FPG.vcf.gz -b FPG.beta.txt
+python ../../../genotools/mr.py GeneticScore -I FPG.vcf.gz -b FPG.beta.txt --dosage
+
 ```

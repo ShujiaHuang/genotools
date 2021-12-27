@@ -474,7 +474,7 @@ def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
     return
 
 
-def calculate_genetic_score(in_vcf_fn, pos_beta_value, fam, is_dosage=False):
+def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, is_dosage=False):
     sample2index, index2sample = {}, {}
     gs, af_beta = {}, {}
     mother_child_idx = []
@@ -541,8 +541,12 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, fam, is_dosage=False):
             af = float(info["AF"])  # ALT allele frequency
 
             ind_format = {name: i for i, name in enumerate(col[8].split(":"))}
-            if ("GT" not in ind_format) or ("GP" not in ind_format):
-                raise ValueError("[ERROR]VCF ERROR: GT or GP not in FORMAT.")
+            if "GT" not in ind_format:
+                raise ValueError("[ERROR] 'GT' filed is required in VCF for each individual.")
+
+            if is_dosage and (("GP" not in ind_format) and ("DS" not in ind_format)):
+                raise ValueError("[ERROR] 'GP' or 'DS' field is required for dosage "
+                                 "for each individual.")
 
             for m, c, is_duo in mother_child_idx:
                 # Genotype should be: [0, 0], [0, 1], [1, 0] or [1, 1]
@@ -550,10 +554,6 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, fam, is_dosage=False):
                 # `child_gt[0]` is paternal allele and `child_gt[1]` is maternal allele.
                 child_gt = list(map(int, col[c].split(":")[ind_format["GT"]].split("|")))  #
                 mother_gt = list(map(int, col[m].split(":")[ind_format["GT"]].split("|")))
-
-                # Should be the probability of genotype: [0.99, 0.01, 0.00] for [Hom_Ref, Het_Var, Hom_Var]
-                child_gp = list(map(float, col[c].split(":")[ind_format["GP"]].split(",")))
-                mother_gp = list(map(float, col[m].split(":")[ind_format["GP"]].split(",")))
 
                 if (sum(mother_gt) == 0 and sum(child_gt) == 2) or (sum(mother_gt) == 2 and sum(child_gt) == 0):
                     # Mendelian error
@@ -568,8 +568,17 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, fam, is_dosage=False):
                 # `h2`: maternal non-transmitted allele/dosage
                 # `h3`: paternal transmitted allele/dosage (fetal only allele)
                 if is_dosage:
-                    mat = mother_gp[1] + 2 * mother_gp[2]
-                    fet = child_gp[1] + 2 * child_gp[2]
+                    # Should be the probability of genotype: [0.99, 0.01, 0.00] for [Hom_Ref, Het_Var, Hom_Var]
+                    if "GP" in ind_format:
+                        mat = float(col[c].split(":")[ind_format["DS"]])
+                        fet = float(col[m].split(":")[ind_format["DS"]])
+
+                    else:  # GP in ind_format
+                        child_gp = list(map(float, col[c].split(":")[ind_format["GP"]].split(",")))
+                        mother_gp = list(map(float, col[m].split(":")[ind_format["GP"]].split(",")))
+                        mat = mother_gp[1] + 2 * mother_gp[2]
+                        fet = child_gp[1] + 2 * child_gp[2]
+
                     h1 = child_gt[1] * fet / max(1, sum(child_gt))  # Het: divide 1; Hom: divide 2
                     h2 = (mother_gt[0] if (mother_gt[0] != child_gt[1]) else
                           mother_gt[1]) * mat / max(1, sum(mother_gt))
@@ -611,12 +620,109 @@ def calculate_genetic_score(in_vcf_fn, pos_beta_value, fam, is_dosage=False):
     for m, c, _ in mother_child_idx:
         k = index2sample[m] + "_" + index2sample[c]
         genetic_score = np.mean(gs[k], axis=0)  # Average
-        print("%s\t%s\t%s\t%d" % (
-            index2sample[m],
-            index2sample[c],
-            "\t".join(map(str, genetic_score)),
-            len(gs[k]))
-        )
+        print("%s\t%s\t%s\t%d" % (index2sample[m],
+                                  index2sample[c],
+                                  "\t".join(map(str, genetic_score)),
+                                  len(gs[k])))
+
+    return
+
+
+def calculate_genotype_score(in_vcf_fn, pos_beta_value, is_dosage=False):
+    """Calculate the Genetic score (or call PRS) for individuals in VCF"""
+    samples = []
+    sample2index, index2sample = {}, {}
+    gs, af_beta = {}, {}
+    n = 0
+    with gzip.open(in_vcf_fn, "rt") if in_vcf_fn.endswith(".gz") else open(in_vcf_fn, "rt") as IN:
+        # VCF file
+        for line in IN:
+            if line.startswith("##"):
+                continue
+
+            col = line.strip().split()
+            if line.startswith("#CHROM"):
+                for i in range(9, len(col)):  # load sample ID and the index of sample
+                    sample2index[col[i]] = i
+                    index2sample[i] = col[i]
+                    samples.append(col[i])
+                continue
+
+            n += 1
+            if n % 100000 == 0:
+                elapse_time = datetime.now() - START_TIME
+                sys.stderr.write("[INFO] Processing %d records done, "
+                                 "%d seconds elapsed\n" % (n, elapse_time.seconds))
+
+            """
+            #CHROM  POS     ID      REF     ALT
+            chr7   44184122    rs730497        G       A
+            """
+            pos = col[0] + ":" + col[1]
+            ref_allele = col[3].upper()
+            alt_allele = col[4].upper()
+
+            if "," in alt_allele:  # ignore multi-allelic
+                continue
+
+            if pos not in pos_beta_value:
+                continue
+
+            # a1 is the effective allele, a2 is the non-effective allele.
+            a1, a2, beta = pos_beta_value[pos]
+            if (ref_allele + alt_allele != a1 + a2) and (alt_allele + ref_allele != a1 + a2):
+                raise ValueError("[ERROR] Alleles not matched: "
+                                 "[%s, %s] != [%s, %s]" % (ref_allele, alt_allele, a1, a2))
+
+            if ref_allele == a1:
+                beta = -1.0 * beta
+
+            # info = {c.split("=")[0]: c.split("=")[-1] for c in col[7].split(";") if "=" in c}
+            # af = float(info["AF"])  # ALT allele frequency
+
+            ind_format = {name: i for i, name in enumerate(col[8].split(":"))}
+            if "GT" not in ind_format:
+                raise ValueError("[ERROR] 'GT' filed is required in VCF for each individual.")
+
+            if is_dosage and (("GP" not in ind_format) and ("DS" not in ind_format)):
+                raise ValueError("[ERROR] 'GP' or 'DS' field is required for dosage "
+                                 "for each individual.")
+
+            for i in range(9, len(col)):
+                # Genotype should be: [0, 0], [0, 1], [1, 0] or [1, 1]
+                gt_str = col[i].split(":")[ind_format["GT"]]
+                if "." in gt_str:
+                    # non call genotype
+                    continue
+
+                gt = list(map(int, gt_str.replace("/", "|").split("|")))
+                if is_dosage:
+                    # Should be the probability of genotype: [0.99, 0.01, 0.00] for [Hom_Ref, Het_Var, Hom_Var]
+                    if "DS" in ind_format:
+                        g = float(col[i].split(":")[ind_format["DS"]])
+
+                    else:  # GP in ind_format
+                        gp = list(map(float, col[i].split(":")[ind_format["GP"]].split(",")))
+                        g = gp[1] + 2 * gp[2]
+
+                else:
+                    g = sum(gt)
+
+                g_score = g * beta
+                k = index2sample[i]
+                if k not in gs:
+                    gs[k] = []
+
+                gs[k].append(g_score)  # record score for each position
+
+    elapse_time = datetime.now() - START_TIME
+    sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapse_time.seconds))
+
+    # Calculate the PRS for each type of allele
+    print("#SampleID\tgenotype_score\tsite_number")
+    for sample in samples:
+        genetic_score = np.mean(gs[sample], axis=0)  # Average
+        print("%s\t%f\t%d" % (sample, genetic_score, len(gs[k])))
 
     return
 
@@ -709,14 +815,15 @@ if __name__ == "__main__":
                         help="Input a .fam file with mother and children.")
     ss_cmd.add_argument("--dosage", dest="dosage", action="store_true", help="Use dosage.")
 
-    gs_cmd = commands.add_parser("GeneticScore", help="Calculate Genetic score according to the "
-                                                      "parent_origin VCF (by ``TTC``).")
+    gs_cmd = commands.add_parser("GeneticScore", help="Calculate Genetic score.")
     gs_cmd.add_argument("-I", "--target", dest="target", type=str, required=True,
                         help="Input VCF. Required.")
     gs_cmd.add_argument("-b", "--base", dest="base", type=str, required=True,
                         help="A POS file with beta value for each position")
-    gs_cmd.add_argument("--fam", dest="fam", type=str, required=True,
-                        help="Input a .fam file with mother and children.")
+    gs_cmd.add_argument("--fam", dest="fam", type=str, required=False,
+                        help="Input a .fam file [option]. If provide .fam file, this module will only "
+                             "calculate the genetic score for mother-child pairs according to the "
+                             "parent_origin VCF, which create by 'TTC' module.")
     gs_cmd.add_argument("--dosage", dest="dosage", action="store_true", help="Use dosage.")
 
     # mr_cmd = commands.add_parser("MR", help="Mendelian Randomization")
@@ -743,9 +850,14 @@ if __name__ == "__main__":
         distinguish_origin(args.target, fam_data, is_dosage=args.dosage)
 
     elif args.command == "GeneticScore":
-        fam_data = load_fam_data(args.fam)
-        beta_value = get_beta_value(args.base)
-        calculate_genetic_score(args.target, beta_value, fam_data, is_dosage=args.dosage)
+        if args.fam:
+            fam_data = load_fam_data(args.fam)
+            beta_value = get_beta_value(args.base)
+            calculate_genotype_and_haplotype_score(args.target, beta_value, fam_data,
+                                                   is_dosage=args.dosage)
+        else:
+            beta_value = get_beta_value(args.base)
+            calculate_genotype_score(args.target, beta_value, is_dosage=args.dosage)
 
     # elif args.command == "MR":
     #     data = pd.read_table(args.input, sep="\t")
