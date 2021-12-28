@@ -259,7 +259,7 @@ def offspring_genotype_origin(data, fam_idx, index2sample):
 
             if is_error_genotype_match:
                 paternal_allele_origin[c] = [0, False]
-                sys.stderr.write("[ERROR] Genotype match failed but still set original and "
+                sys.stderr.write("[WARNING] Genotype match failed but still set original and "
                                  "continue: %s \t(father: %s, %s), (mother: %s, %s) and "
                                  "(child: %s, %s).\n" % (
                                      "\t".join(d[0:5]),
@@ -279,9 +279,12 @@ def output_origin_phased(data, paternal_allele_origin):
             ind_info = d[k].split(":")  # 0|0:0:1,0,0
             gt = ind_info[ind_format["GT"]].split("|")
 
-            # new GT
-            ind_info[ind_format["GT"]] = "|".join([gt[c[0]], gt[1 - c[0]]])
-            d[k] = ":".join(ind_info)
+            # adjust the GT to be "Paternal|Maternal"
+            try:
+                ind_info[ind_format["GT"]] = "|".join([gt[c[0]], gt[1 - c[0]]])
+                d[k] = ":".join(ind_info)
+            except IndexError as e:
+                raise ValueError("[ERROR] IndexError: %s\n%s\n%s" % (e, d[k], "\t".join(d)))
 
         print("%s" % "\t".join(d))
 
@@ -409,7 +412,7 @@ def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
 
             ind_format = {name: i for i, name in enumerate(col[8].split(":"))}
             if ("GT" not in ind_format) or ("GP" not in ind_format):
-                raise ValueError("[ERROR]VCF ERROR: GT or GP not in FORMAT.")
+                raise ValueError("[ERROR] VCF ERROR: GT or GP not in FORMAT.")
 
             for c, m in child_mother_idx:
                 # Genotype should be: [0, 0], [0, 1], [1, 0] or [1, 1]
