@@ -427,8 +427,8 @@ def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
                 if k not in data:
                     data[k] = []
 
-                child_gt_str = col[c].split(":")[ind_format["GT"]]
                 mother_gt_str = col[m].split(":")[ind_format["GT"]]
+                child_gt_str = col[c].split(":")[ind_format["GT"]]
                 if ("." in mother_gt_str) or ("." in child_gt_str):
                     # missing call, do nothing
                     data[k].append([snp, -9, -9, -9, -9, -9])
@@ -437,8 +437,8 @@ def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
                 # Genotype should be: [0, 0], [0, 1], [1, 0] or [1, 1]
                 # `child_gt` is in "paternal_hap|maternal_hap" format after "TTC" process, so
                 # `child_gt[0]` is paternal allele and `child_gt[1]` is maternal allele.
-                child_gt = list(map(int, col[c].split(":")[ind_format["GT"]].split("|")))  #
                 mother_gt = list(map(int, col[m].split(":")[ind_format["GT"]].split("|")))
+                child_gt = list(map(int, col[c].split(":")[ind_format["GT"]].split("|")))  #
 
                 # `h1`: maternal transmitted allele/dosage
                 # `h2`: maternal non-transmitted allele/dosage
@@ -447,12 +447,12 @@ def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
 
                     # Should be the probability of genotype: [0.99, 0.01, 0.00] for [Hom_Ref, Het_Var, Hom_Var]
                     if "DS" in ind_format:
-                        mat = float(col[c].split(":")[ind_format["DS"]])
-                        fet = float(col[m].split(":")[ind_format["DS"]])
+                        mat = float(col[m].split(":")[ind_format["DS"]])
+                        fet = float(col[c].split(":")[ind_format["DS"]])
 
                     else:  # GP in ind_format
-                        child_gp = list(map(float, col[c].split(":")[ind_format["GP"]].split(",")))
                         mother_gp = list(map(float, col[m].split(":")[ind_format["GP"]].split(",")))
+                        child_gp = list(map(float, col[c].split(":")[ind_format["GP"]].split(",")))
                         mat = mother_gp[1] + 2 * mother_gp[2]
                         fet = child_gp[1] + 2 * child_gp[2]
 
@@ -574,8 +574,8 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, is_do
 
             for m, c, is_trio in mother_child_idx:
 
-                child_gt_str = col[c].split(":")[ind_format["GT"]]
                 mother_gt_str = col[m].split(":")[ind_format["GT"]]
+                child_gt_str = col[c].split(":")[ind_format["GT"]]
 
                 if ("." in mother_gt_str) or ("." in child_gt_str):
                     # missing call, do nothing
@@ -584,8 +584,8 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, is_do
                 # Genotype should be: [0, 0], [0, 1], [1, 0] or [1, 1]
                 # `child_gt` is in "paternal_hap|maternal_hap" format after "TTC" process, so
                 # `child_gt[0]` is paternal allele and `child_gt[1]` is maternal allele.
-                child_gt = list(map(int, child_gt_str.split("|")))
                 mother_gt = list(map(int, mother_gt_str.split("|")))
+                child_gt = list(map(int, child_gt_str.split("|")))
 
                 if (sum(mother_gt) == 0 and sum(child_gt) == 2) or (sum(mother_gt) == 2 and sum(child_gt) == 0):
                     # Mendelian error
@@ -602,12 +602,12 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, is_do
                 if is_dosage:
                     # Should be the probability of genotype: [0.99, 0.01, 0.00] for [Hom_Ref, Het_Var, Hom_Var]
                     if "DS" in ind_format:
-                        mat = float(col[c].split(":")[ind_format["DS"]])
-                        fet = float(col[m].split(":")[ind_format["DS"]])
+                        mat = float(col[m].split(":")[ind_format["DS"]])
+                        fet = float(col[c].split(":")[ind_format["DS"]])
 
                     else:  # GP in ind_format
-                        child_gp = list(map(float, col[c].split(":")[ind_format["GP"]].split(",")))
                         mother_gp = list(map(float, col[m].split(":")[ind_format["GP"]].split(",")))
+                        child_gp = list(map(float, col[c].split(":")[ind_format["GP"]].split(",")))
                         mat = mother_gp[1] + 2 * mother_gp[2]
                         fet = child_gp[1] + 2 * child_gp[2]
 
