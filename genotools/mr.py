@@ -214,7 +214,7 @@ def offspring_genotype_origin(data, fam_idx, index2sample):
             if (("." in child[ind_format["GT"]]) or
                     (father and "." in father[ind_format["GT"]]) or
                     (mother and "." in mother[ind_format["GT"]])):
-                # contain missing genotype, ignore
+                # missing call, do nothing
                 continue
 
             if (("/" in child[ind_format["GT"]]) or
@@ -279,12 +279,16 @@ def output_origin_phased(data, paternal_allele_origin):
             ind_info = d[k].split(":")  # 0|0:0:1,0,0
             gt = ind_info[ind_format["GT"]].split("|")
 
+            if "." in gt:  # Missing call, do nothing
+                continue
+
             # adjust the GT to be "Paternal|Maternal"
             try:
                 ind_info[ind_format["GT"]] = "|".join([gt[c[0]], gt[1 - c[0]]])
                 d[k] = ":".join(ind_info)
             except IndexError as e:
-                raise ValueError("[ERROR] IndexError: %s\n%s\n%s" % (e, d[k], "\t".join(d)))
+                raise ValueError("[ERROR] IndexError: %s\n\n%s\n%s" % 
+                                 (e, d[k], "\t".join(d)))
 
         print("%s" % "\t".join(d))
 
@@ -342,7 +346,8 @@ def determine_variant_parent_origin(in_vcf_fn, fam, window=10000):
             n += 1
             if n % 100000 == 0:
                 elapse_time = datetime.now() - START_TIME
-                sys.stderr.write("[INFO] Processing %d records done, %d seconds elapsed\n" % (n, elapse_time.seconds))
+                sys.stderr.write("[INFO] Processing %d records done, %d seconds elapsed\n" % (n, 
+                    elapse_time.seconds))
 
             if "," in col[4]:  # ignore multi-allelic
                 continue
@@ -552,11 +557,19 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, is_do
                                  "for each individual.")
 
             for m, c, is_duo in mother_child_idx:
+
+                child_gt_str = col[c].split(":")[ind_format["GT"]]
+                mother_gt_str = col[m].split(":")[ind_format["GT"]]
+
+                if ("." in mother_gt_str) or ("." in child_gt_str):  
+                    # missing call, do nothing
+                    continue
+
                 # Genotype should be: [0, 0], [0, 1], [1, 0] or [1, 1]
                 # `child_gt` is in "paternal_hap|maternal_hap" format after "TTC" process, so
                 # `child_gt[0]` is paternal allele and `child_gt[1]` is maternal allele.
-                child_gt = list(map(int, col[c].split(":")[ind_format["GT"]].split("|")))  #
-                mother_gt = list(map(int, col[m].split(":")[ind_format["GT"]].split("|")))
+                child_gt = list(map(int, child_gt_str.split("|"))) 
+                mother_gt = list(map(int, mother_gt_str.split("|")))
 
                 if (sum(mother_gt) == 0 and sum(child_gt) == 2) or (sum(mother_gt) == 2 and sum(child_gt) == 0):
                     # Mendelian error
@@ -692,7 +705,7 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, is_dosage=False):
                 # Genotype should be: [0, 0], [0, 1], [1, 0] or [1, 1]
                 gt_str = col[i].split(":")[ind_format["GT"]]
                 if "." in gt_str:
-                    # non call genotype
+                    # missing call, do nothing
                     continue
 
                 gt = list(map(int, gt_str.replace("/", "|").split("|")))
