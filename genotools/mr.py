@@ -410,7 +410,6 @@ def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
             chr7   44184122    rs730497        G       A
             """
             snp = col[2] if col[2] != "." else "-".join([col[0], col[1], col[3], col[4]])
-
             if "," in col[4]:  # ignore multi-allelic
                 continue
 
