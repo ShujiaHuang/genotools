@@ -620,7 +620,7 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, is_do
                 else:
                     mat = sum(mother_gt)
                     fet = sum(child_gt)
-                    h1 = child_gt[1]  # The parent origin of variants of child has been distinguish in `TTC` process.
+                    h1 = child_gt[1]  # The parent-of-origin allele of child has been distinguish by `TTC` process.
                     h2 = mother_gt[0] if mother_gt[0] != child_gt[1] else mother_gt[1]
                     h3 = child_gt[0]
 
