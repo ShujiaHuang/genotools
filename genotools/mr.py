@@ -200,8 +200,8 @@ def paternal_allele_origin_by_trio(sample_gt, father_gt, mother_gt):
 
 
 def offspring_genotype_origin(data, fam_idx, index2sample):
-    format_index = {name: i for i, name in enumerate(data[0][8].split(":"))}
-    if "GT" not in format_index:
+    ind_format = {name: i for i, name in enumerate(data[0][8].split(":"))}
+    if "GT" not in ind_format:
         raise ValueError("[ERROR] VCF ERROR: GT is not in FORMAT.")
 
     paternal_allele_origin = {}  # key value is the array index of child in VCF
@@ -211,15 +211,15 @@ def offspring_genotype_origin(data, fam_idx, index2sample):
             mother = d[m].split(":") if m is not None else None
             child = d[c].split(":")
 
-            if (("." in child[format_index["GT"]]) or
-                    (father and "." in father[format_index["GT"]]) or
-                    (mother and "." in mother[format_index["GT"]])):
+            if (("." in child[ind_format["GT"]]) or
+                    (father and "." in father[ind_format["GT"]]) or
+                    (mother and "." in mother[ind_format["GT"]])):
                 # missing call, do nothing
                 continue
 
-            if (("/" in child[format_index["GT"]]) or
-                    (father and "/" in father[format_index["GT"]]) or
-                    (mother and "/" in mother[format_index["GT"]])):
+            if (("/" in child[ind_format["GT"]]) or
+                    (father and "/" in father[ind_format["GT"]]) or
+                    (mother and "/" in mother[ind_format["GT"]])):
                 raise ValueError("[ERORR] Unphased sample: %s, %s or %s. Detail: %s" % (
                     index2sample[f] if f is not None else "",
                     index2sample[m] if m is not None else "",
@@ -229,18 +229,18 @@ def offspring_genotype_origin(data, fam_idx, index2sample):
                                        d[c]])))
 
             # Genotype should be: "0|0", "0|1", "1|0" or "1|1"
-            father_gt = father[format_index["GT"]] if father else None
-            mother_gt = mother[format_index["GT"]] if mother else None
-            child_gt = child[format_index["GT"]]
+            father_gt = father[ind_format["GT"]] if father else None
+            mother_gt = mother[ind_format["GT"]] if mother else None
+            child_gt = child[ind_format["GT"]]
 
             if c not in paternal_allele_origin:
-                # Key value is the index of child individual in VCF line. [genotype_index, is_clear_origin]
+                # Key value is the index of child in VCF line. [genotype_index, is_clear_origin]
                 is_error_genotype_match, paternal_allele_origin[c] = False, [0, False]
 
             if paternal_allele_origin[c][1]:
+                # the parent-of-origin of child's GT is clear, do nothing for this individual
                 continue
 
-            # Key value is the index of child individual in VCF line. [genotype_index, is_clear_origin]
             if father_gt is None or mother_gt is None:
                 # duo
                 if mother_gt:
@@ -273,17 +273,17 @@ def offspring_genotype_origin(data, fam_idx, index2sample):
 
 
 def output_origin_phased(data, paternal_allele_origin):
-    format_index = {name: i for i, name in enumerate(data[0][8].split(":"))}
+    ind_format = {name: i for i, name in enumerate(data[0][8].split(":"))}
     for d in data:
         for k, c in paternal_allele_origin.items():
             ind_info = d[k].split(":")  # 0|0:0:1,0,0
-            if "." in ind_info[format_index["GT"]]:  # Missing call, do nothing
+            if "." in ind_info[ind_format["GT"]]:  # Missing call, do nothing
                 continue
 
             try:
                 # adjust the GT to be "Paternal|Maternal"
-                gt = ind_info[format_index["GT"]].split("|")
-                ind_info[format_index["GT"]] = "|".join([gt[c[0]], gt[1 - c[0]]])
+                gt = ind_info[ind_format["GT"]].split("|")
+                ind_info[ind_format["GT"]] = "|".join([gt[c[0]], gt[1 - c[0]]])
                 d[k] = ":".join(ind_info)
             except IndexError as e:
                 raise ValueError("[ERROR] IndexError: %s\n\n[Target] %s\n[ALL] %s" %
@@ -410,14 +410,15 @@ def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
             chr7   44184122    rs730497        G       A
             """
             snp = col[2] if col[2] != "." else "-".join([col[0], col[1], col[3], col[4]])
+
             if "," in col[4]:  # ignore multi-allelic
                 continue
 
-            format_index = {name: i for i, name in enumerate(col[8].split(":"))}
-            if "GT" not in format_index:
+            ind_format = {name: i for i, name in enumerate(col[8].split(":"))}
+            if "GT" not in ind_format:
                 raise ValueError("[ERROR] 'GT' filed is required in VCF for each individual.")
 
-            if is_dosage and ("GP" not in format_index) and ("DS" not in format_index):
+            if is_dosage and ("GP" not in ind_format) and ("DS" not in ind_format):
                 raise ValueError("[ERROR] 'GP' or 'DS' field is required for dosage "
                                  "for each individual.")
 
@@ -426,8 +427,8 @@ def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
                 if k not in data:
                     data[k] = []
 
-                mother_gt_str = col[m].split(":")[format_index["GT"]]
-                child_gt_str = col[c].split(":")[format_index["GT"]]
+                mother_gt_str = col[m].split(":")[ind_format["GT"]]
+                child_gt_str = col[c].split(":")[ind_format["GT"]]
                 if ("." in mother_gt_str) or ("." in child_gt_str):
                     # missing call, do nothing
                     data[k].append([snp, -9, -9, -9, -9, -9])
@@ -436,8 +437,8 @@ def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
                 # Genotype should be: [0, 0], [0, 1], [1, 0] or [1, 1]
                 # `child_gt` is in "paternal_hap|maternal_hap" format after "TTC" process, so
                 # `child_gt[0]` is paternal allele and `child_gt[1]` is maternal allele.
-                mother_gt = list(map(int, col[m].split(":")[format_index["GT"]].split("|")))
-                child_gt = list(map(int, col[c].split(":")[format_index["GT"]].split("|")))  #
+                mother_gt = list(map(int, col[m].split(":")[ind_format["GT"]].split("|")))
+                child_gt = list(map(int, col[c].split(":")[ind_format["GT"]].split("|")))  #
 
                 # `h1`: maternal transmitted allele/dosage
                 # `h2`: maternal non-transmitted allele/dosage
@@ -445,13 +446,13 @@ def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
                 if is_dosage:
 
                     # Should be the probability of genotype: [0.99, 0.01, 0.00] for [Hom_Ref, Het_Var, Hom_Var]
-                    if "DS" in format_index:
-                        mat = float(col[m].split(":")[format_index["DS"]])
-                        fet = float(col[c].split(":")[format_index["DS"]])
+                    if "DS" in ind_format:
+                        mat = float(col[m].split(":")[ind_format["DS"]])
+                        fet = float(col[c].split(":")[ind_format["DS"]])
 
-                    else:  # GP in format_index
-                        mother_gp = list(map(float, col[m].split(":")[format_index["GP"]].split(",")))
-                        child_gp = list(map(float, col[c].split(":")[format_index["GP"]].split(",")))
+                    else:  # GP in ind_format
+                        mother_gp = list(map(float, col[m].split(":")[ind_format["GP"]].split(",")))
+                        child_gp = list(map(float, col[c].split(":")[ind_format["GP"]].split(",")))
                         mat = mother_gp[1] + 2 * mother_gp[2]
                         fet = child_gp[1] + 2 * child_gp[2]
 
@@ -497,7 +498,7 @@ def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
     return
 
 
-def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, is_dosage=False):
+def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, score_model, is_dosage=False):
     sample2index, index2sample = {}, {}
     gs, af_beta = {}, {}
     mother_child_idx = []
@@ -554,8 +555,6 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, is_do
             # a1 is the effective allele, a2 is the non-effective allele.
             a1, a2, beta = pos_beta_value[pos]
             if (ref_allele + alt_allele != a1 + a2) and (alt_allele + ref_allele != a1 + a2):
-                #raise ValueError("[ERROR] Alleles not matched: [%s, %s] != [%s, %s]\n"
-                #                 "%s" % (ref_allele, alt_allele, a1, a2, line))
                 sys.stderr.write("[ERROR] Alleles not matched: [%s, %s] != [%s, %s]\n"
                                  "%s" % (ref_allele, alt_allele, a1, a2, line))
                 continue
@@ -566,18 +565,18 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, is_do
             # info = {c.split("=")[0]: c.split("=")[-1] for c in col[7].split(";") if "=" in c}
             # af = float(info["AF"])  # ALT allele frequency
 
-            format_index = {name: i for i, name in enumerate(col[8].split(":"))}
-            if "GT" not in format_index:
+            ind_format = {name: i for i, name in enumerate(col[8].split(":"))}
+            if "GT" not in ind_format:
                 raise ValueError("[ERROR] 'GT' filed is required in VCF for each individual.")
 
-            if is_dosage and ("GP" not in format_index) and ("DS" not in format_index):
+            if is_dosage and ("GP" not in ind_format) and ("DS" not in ind_format):
                 raise ValueError("[ERROR] 'GP' or 'DS' field is required for dosage "
                                  "for each individual.")
 
             for m, c, is_trio in mother_child_idx:
 
-                mother_gt_str = col[m].split(":")[format_index["GT"]]
-                child_gt_str = col[c].split(":")[format_index["GT"]]
+                mother_gt_str = col[m].split(":")[ind_format["GT"]]
+                child_gt_str = col[c].split(":")[ind_format["GT"]]
 
                 if ("." in mother_gt_str) or ("." in child_gt_str):
                     # missing call, do nothing
@@ -593,29 +592,34 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, is_do
                     # Mendelian error
                     continue
 
-                is_duo = not is_trio
-                if is_duo and (sum(mother_gt) == 1) and (sum(child_gt) == 1):  # 0,1 => 0,1
-                    # can not distinguish the maternal allele
-                    continue
+                #is_duo = not is_trio
+                #if is_duo and (sum(mother_gt) == 1) and (sum(child_gt) == 1):  # 0,1 => 0,1
+                    # Can not distinguish the maternal allele
+                    # continue
+
+                    # Shuffle the list of child's genotype, we have 50% chance to match the 
+                    # correct parent-of-origin in such situation
+                    #np.random.shuffle(child_gt)
+
+                 #   child_gt = [0, 1]
 
                 # `h1`: maternal transmitted allele/dosage
                 # `h2`: maternal non-transmitted allele/dosage
                 # `h3`: paternal transmitted allele/dosage (fetal only allele)
                 if is_dosage:
                     # Should be the probability of genotype: [0.99, 0.01, 0.00] for [Hom_Ref, Het_Var, Hom_Var]
-                    if "DS" in format_index:
-                        mat = float(col[m].split(":")[format_index["DS"]])
-                        fet = float(col[c].split(":")[format_index["DS"]])
+                    if "DS" in ind_format:
+                        mat = float(col[m].split(":")[ind_format["DS"]])
+                        fet = float(col[c].split(":")[ind_format["DS"]])
 
-                    else:  # GP in format_index
-                        mother_gp = list(map(float, col[m].split(":")[format_index["GP"]].split(",")))
-                        child_gp = list(map(float, col[c].split(":")[format_index["GP"]].split(",")))
+                    else:  # GP in ind_format
+                        mother_gp = list(map(float, col[m].split(":")[ind_format["GP"]].split(",")))
+                        child_gp = list(map(float, col[c].split(":")[ind_format["GP"]].split(",")))
                         mat = mother_gp[1] + 2 * mother_gp[2]
                         fet = child_gp[1] + 2 * child_gp[2]
 
                     h1 = child_gt[1] * fet / max(1, sum(child_gt))  # Het: divide 1; Hom: divide 2
-                    h2 = (mother_gt[0] if (mother_gt[0] != child_gt[1]) else
-                          mother_gt[1]) * mat / max(1, sum(mother_gt))
+                    h2 = (mother_gt[0] if (mother_gt[0] != child_gt[1]) else mother_gt[1]) * mat / max(1, sum(mother_gt))
                     h3 = child_gt[0] * fet / max(1, sum(child_gt))  # paternal allele
                 else:
                     mat = sum(mother_gt)
@@ -653,7 +657,10 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, is_do
           "fetal_genetic_effect\th1\th2\th3\tsite_number")
     for m, c, _ in mother_child_idx:
         k = index2sample[m] + "_" + index2sample[c]
-        genetic_score = np.mean(gs[k], axis=0)  # Average
+        if score_model == "avg":
+            genetic_score = np.mean(gs[k], axis=0)  # Average
+        else:
+            genetic_score = np.sum(gs[k], axis=0)  # Sum
         print("%s\t%s\t%s\t%d" % (index2sample[m],
                                   index2sample[c],
                                   "\t".join(map(str, genetic_score)),
@@ -662,7 +669,7 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, is_do
     return
 
 
-def calculate_genotype_score(in_vcf_fn, pos_beta_value, is_dosage=False):
+def calculate_genotype_score(in_vcf_fn, pos_beta_value, score_model, is_dosage=False):
     """Calculate the Genetic score (or call PRS) for individuals in VCF"""
     samples = []
     sample2index, index2sample = {}, {}
@@ -711,17 +718,17 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, is_dosage=False):
             if ref_allele == a1:
                 beta = -1.0 * beta
 
-            format_index = {name: i for i, name in enumerate(col[8].split(":"))}
-            if "GT" not in format_index:
+            ind_format = {name: i for i, name in enumerate(col[8].split(":"))}
+            if "GT" not in ind_format:
                 raise ValueError("[ERROR] 'GT' filed is required in VCF for each individual.")
 
-            if is_dosage and ("GP" not in format_index) and ("DS" not in format_index):
+            if is_dosage and ("GP" not in ind_format) and ("DS" not in ind_format):
                 raise ValueError("[ERROR] 'GP' or 'DS' field is required for dosage "
                                  "for each individual.")
 
             for i in range(9, len(col)):
                 # Genotype should be: [0, 0], [0, 1], [1, 0] or [1, 1]
-                gt_str = col[i].split(":")[format_index["GT"]]
+                gt_str = col[i].split(":")[ind_format["GT"]]
                 if "." in gt_str:
                     # missing call, do nothing
                     continue
@@ -729,11 +736,11 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, is_dosage=False):
                 gt = list(map(int, gt_str.replace("/", "|").split("|")))
                 if is_dosage:
                     # Should be the probability of genotype: [0.99, 0.01, 0.00] for [Hom_Ref, Het_Var, Hom_Var]
-                    if "DS" in format_index:
-                        g = float(col[i].split(":")[format_index["DS"]])
+                    if "DS" in ind_format:
+                        g = float(col[i].split(":")[ind_format["DS"]])
 
-                    else:  # GP in format_index
-                        gp = list(map(float, col[i].split(":")[format_index["GP"]].split(",")))
+                    else:  # GP in ind_format
+                        gp = list(map(float, col[i].split(":")[ind_format["GP"]].split(",")))
                         g = gp[1] + 2 * gp[2]
 
                 else:
@@ -752,7 +759,10 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, is_dosage=False):
     # Calculate the PRS for each type of allele
     print("#SampleID\tgenotype_score\tsite_number")
     for sample in samples:
-        genetic_score = np.mean(gs[sample], axis=0)  # Average
+        if score_model == "avg":
+            genetic_score = np.mean(gs[sample], axis=0)  # Average
+        else:
+            genetic_score = np.sum(gs[sample], axis=0)   # sum
         print("%s\t%f\t%d" % (sample, genetic_score, len(gs[k])))
 
     return
@@ -855,6 +865,8 @@ if __name__ == "__main__":
                         help="Input a .fam file [option]. If provide .fam file, this module will only "
                              "calculate the genetic score for mother-child pairs according to the "
                              "parent_origin VCF, which create by 'TTC' module.")
+    gs_cmd.add_argument("--score-model", dest="sm", type=str, default="avg", required=False,
+                        help="The model for calculating genetic score [avg, sum]. Default: avg.")
     gs_cmd.add_argument("--dosage", dest="dosage", action="store_true", help="Use dosage.")
 
     # mr_cmd = commands.add_parser("MR", help="Mendelian Randomization")
@@ -881,14 +893,18 @@ if __name__ == "__main__":
         distinguish_origin(args.target, fam_data, is_dosage=args.dosage)
 
     elif args.command == "GeneticScore":
+
+        if args.sm not in ["avg", "sum"]:
+            raise ValueError("[ERROR] The value of argument '--score-model' could only be 'avg' or 'sum'.")
+
         if args.fam:
             fam_data = load_fam_data(args.fam)
             beta_value = get_beta_value(args.base)
-            calculate_genotype_and_haplotype_score(args.target, beta_value, fam_data,
+            calculate_genotype_and_haplotype_score(args.target, beta_value, fam_data, score_model=args.sm,
                                                    is_dosage=args.dosage)
         else:
             beta_value = get_beta_value(args.base)
-            calculate_genotype_score(args.target, beta_value, is_dosage=args.dosage)
+            calculate_genotype_score(args.target, beta_value, score_model=args.sm, is_dosage=args.dosage)
 
     # elif args.command == "MR":
     #     data = pd.read_table(args.input, sep="\t")
