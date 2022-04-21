@@ -633,8 +633,8 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, score
                 # `s_h3`: paternal (fetal only) transmitted haplotype genetic score
                 # `s_mat`: maternal genotype score
                 # `s_fet`: fetal genotype score
-                # `g_mat`: Maternal genetic effect
-                # `g_fet`: Fetal genetic effect
+                # `g_mat`: Combination maternal genetic score
+                # `g_fet`: Combination fetal genetic score
                 s_h1 = h1 * beta
                 s_h2 = h2 * beta
                 s_h3 = h3 * beta
@@ -653,14 +653,15 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, score
     sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapse_time.seconds))
 
     # Calculate the PRS for each type of allele
-    print("#Mother\tChild\tmaternal_genotype_score\tchild_genotype_score\tmaternal_genetic_effect\t"
-          "fetal_genetic_effect\th1\th2\th3\tsite_number")
+    print("#Mother\tChild\tmaternal_genotype_score\tchild_genotype_score\tcombination_maternal_genetic_score\t"
+          "combination_fetal_genetic_score\th1\th2\th3\tsite_number")
     for m, c, _ in mother_child_idx:
         k = index2sample[m] + "_" + index2sample[c]
         if score_model == "avg":
             genetic_score = np.mean(gs[k], axis=0)  # Average
         else:
             genetic_score = np.sum(gs[k], axis=0)  # Sum
+            
         print("%s\t%s\t%s\t%d" % (index2sample[m],
                                   index2sample[c],
                                   "\t".join(map(str, genetic_score)),
