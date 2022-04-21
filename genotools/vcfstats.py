@@ -1,4 +1,4 @@
-"""Distribution of the variants's length
+"""Number of variant per sample in vcf file
 
 Author: Shujia Huang
 Date: 2021-04-19 15:08:42
@@ -34,7 +34,7 @@ def is_overlap(chrom, start_pos, end_pos, bed_region, index):
 if __name__ == "__main__":
     START_TIME = datetime.now()
 
-    cmdparser = argparse.ArgumentParser(description="Count variants per sample in a vcf file.")
+    cmdparser = argparse.ArgumentParser(description="Number of variant per sample in vcf file.")
     cmdparser.add_argument("-I", "--input", dest="input", type=str, required=True,
                            help="Input VCF. Required.")
     cmdparser.add_argument("-b", "--bed", dest="bed", type=str, required=True,
@@ -75,7 +75,7 @@ if __name__ == "__main__":
             variants_kn = "Known" if col[2] != "." else "Novel"
             ref = col[3]
             alt = col[4].split(",")  # may be multiple variants
-            ac =   int(re.search(";?AC=([^;]+)", col[7]).group(1))
+            ac = int(re.search(";?AC=([^;]+)", col[7]).group(1))
             af = float(re.search(";?AF=([^;]+)", col[7]).group(1))
             variant_length = [len(a)-len(ref) for i, a in enumerate(alt)]
             variant_type = ["SNP" if s == 0 else ("Deletion" if s<0 else "Insertion") for s in variant_length]
