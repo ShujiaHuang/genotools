@@ -445,7 +445,7 @@ def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
                 # `h3`: paternal transmitted allele/dosage (fetal only allele)
                 if is_dosage:
 
-                    # Should be the probability of genotype: [0.99, 0.01, 0.00] for [Hom_Ref, Het_Var, Hom_Var]
+                    # Should be the probability of genotype. e.g.: [0.99, 0.01, 0.00] for [Hom_Ref, Het_Var, Hom_Var]
                     if "DS" in ind_format:
                         mat = float(col[m].split(":")[ind_format["DS"]])
                         fet = float(col[c].split(":")[ind_format["DS"]])
