@@ -33,8 +33,8 @@ if __name__ == "__main__":
 
             col = line.strip().split()
             chrom = col[0]
-            # if chrom in ["chrX", "chrY", "chrM"]:
-            #     continue
+            if chrom in ["chrX", "chrY", "chrM"]:
+                continue
 
             pos, ref, alt = int(col[1]), col[3], col[4]
             if (len(ref) != 1) or (len(alt) != 1):  # Ignore non SNP site and multiple variants
