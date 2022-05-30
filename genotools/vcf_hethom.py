@@ -19,7 +19,7 @@ if __name__ == "__main__":
     args = cmdparser.parse_args()
 
     n = 0
-    data = {}
+    data = {"All": [0, 0]}
     with gzip.open(args.input, "rt") if args.input.endswith(".gz") else open(args.input, "rt") as IN:
         for line in IN:
             if line.startswith("#"):
@@ -67,13 +67,15 @@ if __name__ == "__main__":
                 
                 if (gt == "1|1") or (gt == "1/1"):
                     data[af_bin][0] += 1
+                    data["All"][0] += 1
                 elif (gt == "1|0") or (gt == "0|1") or (gt == "0/1"):
                     data[af_bin][1] += 1
+                    data["All"][1] += 1
                 else:
                     pass
 
     print ("%s" % "\t".join(["#AF", "nHom", "nHet", "Het/Hom"]))
-    for k in ["AC=1", "AC=2", "0.1%", "1%", "2%", "5%", ">5%"]:
+    for k in ["AC=1", "AC=2", "0.1%", "1%", "2%", "5%", ">5%", "All"]:
         v = data[k]
         print ("%s\t%d\t%d\t%.2f" % (k, v[0], v[1], v[1]/v[0] if v[0] > 0 else -9))
 
