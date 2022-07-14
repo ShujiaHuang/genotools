@@ -51,7 +51,7 @@ if __name__ == "__main__":
             index[chr_id] = 0
 
     n = 0
-    print ("%s" % "\t".join(["CHROM", "POS", "REF", "ALT", "AC", "Raw_AF", "AF", "Variant_length", "Variant_type", "Known_or_novel", "Genome_region"]))
+    print ("%s" % "\t".join(["CHROM", "POS", "REF", "ALT", "AC", "Raw_AF", "AF", "Variant_length", "Variant_type", "Known_or_novel", "Genome_region", "Consequence"]))
     with gzip.open(args.input, "rt") if args.input.endswith(".gz") else open(args.input, "rt") as IN:
         for line in IN:
             if line.startswith("##"):
@@ -90,6 +90,9 @@ if __name__ == "__main__":
                                              index)
             g_region = "CDS" if is_in_coding_region else "Other"
 
+            csq = re.search(";?CSQ=([^;]+)", col[7]).group(1)
+            consequence = csq.split("|")[1]
+
             af_bin = 0
             if ac == 1:
                 af_bin = "AC=1"
@@ -106,7 +109,7 @@ if __name__ == "__main__":
             else:
                 af_bin = ">5%"
 
-            print ("\t".join(map(str, [chrom, pos, ref] + alt + [ac, af, af_bin] + variant_length + variant_type + [variants_kn, g_region])))
+            print ("\t".join(map(str, [chrom, pos, ref] + alt + [ac, af, af_bin] + variant_length + variant_type + [variants_kn, g_region, consequence])))
             
 
     elapsed_time = datetime.now() - START_TIME
