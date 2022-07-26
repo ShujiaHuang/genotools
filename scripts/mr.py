@@ -135,7 +135,7 @@ def paternal_allele_origin_by_duo(sample_gt, parent_gt, is_paternal_gt=False):
         paternal_allele_origin = [0, False]
 
     else:
-        is_error_genotype_match = True  # probably hit HWE
+        is_error_genotype_match = True  # probably hit error genotype or de novo muation
 
     return is_error_genotype_match, paternal_allele_origin
 
@@ -633,21 +633,16 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, score
                 # `s_h3`: paternal (fetal only) transmitted haplotype genetic score
                 # `s_mat`: maternal genotype score
                 # `s_fet`: fetal genotype score
-                # `g_mat`: Combination maternal genetic score
-                # `g_fet`: Combination fetal genetic score
                 s_h1 = h1 * beta
                 s_h2 = h2 * beta
                 s_h3 = h3 * beta
                 s_mat = mat * beta
                 s_fet = fet * beta
-                #g_mat = (s_h1 + s_h2 - s_h3) / 2.0
-                #g_fet = (s_h1 + s_h3 - s_h2) / 2.0
 
                 k = index2sample[m] + "_" + index2sample[c]
                 if k not in gs:
                     gs[k] = []
 
-                #gs[k].append([s_mat, s_fet, g_mat, g_fet, s_h1, s_h2, s_h3])
                 gs[k].append([s_mat, s_fet, s_h1, s_h2, s_h3])
 
     elapse_time = datetime.now() - START_TIME
