@@ -1,4 +1,8 @@
-"""Based on the ratio of X chromosome-derived shotgun sequencing data to the autosomal coverage to establish the probability of an XX or XY karyotype for samples.
+"""A simple sex identification method using WGS data.
+
+Based on the ratio of X chromosome-derived whole-genome sequencing 
+data to the autosomal coverage to establish the probability of an 
+XX or XY karyotype for samples.
 
 Author: Shujia Huang
 Date: 2022-08-02
@@ -88,7 +92,6 @@ def main(fname, samplename):
     sex = infer_sex(ci1, ci2)
     print("#Sample_id\tRx\t95%-CI-Lower\t95%-CI-Upper\tInferred-Sex")
     print("%s" % "\t".join(map(str, [samplename, rx, ci1, ci2, sex])))
-
 
 
 if __name__ == '__main__':
