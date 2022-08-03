@@ -13,6 +13,26 @@ import numpy as np
 START_TIME = datetime.now()
 
 
+def infer_sex(ci1, ci2):
+
+    sex = "-" 
+    if (ci1 > 0.8) {  # The sample should be assigned as Female
+        sex = "Female"
+    } elif (ci2 < 0.6) {  # The sample should be assigned as Male
+        sex = "Male"
+    } elif (ci1 > 0.6 and ci2 > 0.8) {
+        # The sample is consistent with XX but not XY
+        sex = "XX"
+    } elif (ci1 < 0.6 and ci2 < 0.8) {
+        # The sample is consistent with XY but not XX
+        sex = "XY"
+    } else { # The sample could not be assigned
+        sex = "-"
+    }
+
+    return sex
+
+
 def main(fname, samplename):
     autosome_id = set(["chr1","chr2","chr3","chr4","chr5","chr6","chr7","chr8","chr9",
                         "chr10","chr11","chr12","chr13","chr14","chr15","chr16","chr17",
@@ -66,7 +86,9 @@ def main(fname, samplename):
     ci = 1.96 * np.std(xa) / np.sqrt(len(xa))
     ci1, ci2 = rx - ci, rx + ci
 
-    print("%s" % "\t".join(map(str, [samplename, rx, ci1, ci2])))
+    sex = infer_sex(ci1, ci2)
+    print("#Sample_id\tRx\t95%-CI-Lower\t95%-CI-Upper\tInferred-Sex")
+    print("%s" % "\t".join(map(str, [samplename, rx, ci1, ci2, sex])))
 
 
 
