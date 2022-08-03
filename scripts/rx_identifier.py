@@ -16,19 +16,18 @@ START_TIME = datetime.now()
 def infer_sex(ci1, ci2):
 
     sex = "-" 
-    if (ci1 > 0.8) {  # The sample should be assigned as Female
+    if (ci1 > 0.8):  # The sample should be assigned as Female
         sex = "Female"
-    } elif (ci2 < 0.6) {  # The sample should be assigned as Male
+    elif (ci2 < 0.6):  # The sample should be assigned as Male
         sex = "Male"
-    } elif (ci1 > 0.6 and ci2 > 0.8) {
+    elif (ci1 > 0.6 and ci2 > 0.8):
         # The sample is consistent with XX but not XY
         sex = "XX"
-    } elif (ci1 < 0.6 and ci2 < 0.8) {
+    elif (ci1 < 0.6 and ci2 < 0.8):
         # The sample is consistent with XY but not XX
         sex = "XY"
-    } else { # The sample could not be assigned
+    else: # The sample could not be assigned
         sex = "-"
-    }
 
     return sex
 
