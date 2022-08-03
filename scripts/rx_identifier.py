@@ -61,7 +61,7 @@ def main(fname, samplename):
                 continue
 
             col = line.strip().split()
-            chr_name, start, end, depth = col[0], int(col[1]), int(col[2]), int(col[3])
+            chr_name, start, end, depth = col[0], int(float(col[1])), int(float(col[2])), int(float(col[3]))
 
             if chr_name not in chromosome_id:
                 continue
