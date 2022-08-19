@@ -34,7 +34,8 @@ class BedGenerator(object):
             self.depth = depth
 
     def out_last_pos(self):
-        print(self.chromosome, self.start, self.last, self.depth, sep="\t")
+        if self.last != -1:
+            print(self.chromosome, self.start, self.last, self.depth, sep="\t")
 
 
 if __name__ == "__main__":
@@ -42,7 +43,7 @@ if __name__ == "__main__":
 
     bed = BedGenerator()
     n = 0
-    for line in sys.stdin:
+    for line in sys.stdin:  # $ samtools depth --reference ref.fa in.cram | python merge_samtools_depth.py > out.bed
         """
         chr1    10004   1
         chr1    10005   1
