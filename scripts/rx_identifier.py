@@ -70,7 +70,7 @@ def main(fname, samplename):
             if chr_name not in chromosome_id:
                 continue
 
-            total_len += (end - start)
+            total_len += (end - start)  # total mapped length
             total_map += ((end - start) * depth)  # total mapped bases
 
             if chr_name not in chromo_len:
@@ -106,7 +106,7 @@ if __name__ == '__main__':
     args = cmdparser.parse_args()
 
     main(args.bed, args.samplename)
-
+    
     elapsed_time = datetime.now() - START_TIME
     sys.stderr.write("\n** process done, %d seconds elapsed **\n" % elapsed_time.seconds)
 
