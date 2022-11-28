@@ -648,19 +648,23 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, score
     elapse_time = datetime.now() - START_TIME
     sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapse_time.seconds))
 
-    # Calculate the PRS for each type of allele
-    print("#Mother\tChild\tmaternal_genotype_score\tchild_genotype_score\th1\th2\th3\tsite_number")
-    for m, c, _ in mother_child_idx:
-        k = index2sample[m] + "_" + index2sample[c]
-        if score_model == "avg":
-            genetic_score = np.mean(gs[k], axis=0)  # PRS in average model
-        else:
-            genetic_score = np.sum(gs[k], axis=0)   # PRS in sum model
-            
-        print("%s\t%s\t%s\t%d" % (index2sample[m],
-                                  index2sample[c],
-                                  "\t".join(map(str, genetic_score)),
-                                  len(gs[k])))
+    if len(gs) == 0:
+        sys.stderr.write("[ERROR] The VCF file does not overlap with your target positions of beta value.")
+        sys.exit(1)
+    else:
+        # Calculate the PRS for each type of allele
+        print("#Mother\tChild\tmaternal_genotype_score\tchild_genotype_score\th1\th2\th3\tsite_number")
+        for m, c, _ in mother_child_idx:
+            k = index2sample[m] + "_" + index2sample[c]
+            if score_model == "avg":
+                genetic_score = np.mean(gs[k], axis=0)  # PRS in average model
+            else:
+                genetic_score = np.sum(gs[k], axis=0)   # PRS in sum model
+                
+            print("%s\t%s\t%s\t%d" % (index2sample[m],
+                                      index2sample[c],
+                                      "\t".join(map(str, genetic_score)),
+                                      len(gs[k])))
 
     return
 
@@ -671,6 +675,8 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, score_model, is_dosage=F
     sample2index, index2sample = {}, {}
     gs, af_beta = {}, {}
     n = 0
+
+    is_empty = True
     with gzip.open(in_vcf_fn, "rt") if in_vcf_fn.endswith(".gz") else open(in_vcf_fn, "rt") as IN:
         # VCF file
         for line in IN:
@@ -752,14 +758,18 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, score_model, is_dosage=F
     elapse_time = datetime.now() - START_TIME
     sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapse_time.seconds))
 
-    # Calculate the PRS for each type of allele
-    print("#SampleID\tgenotype_score\tsite_number")
-    for sample in samples:
-        if score_model == "avg":
-            genetic_score = np.mean(gs[sample], axis=0)  # Average
-        else:
-            genetic_score = np.sum(gs[sample], axis=0)   # sum
-        print("%s\t%f\t%d" % (sample, genetic_score, len(gs[k])))
+    if len(gs) == 0:
+        sys.stderr.write("[ERROR] The VCF file does not overlap with your target position of beta value.")
+        sys.exit(1)
+    else:
+        # Calculate the PRS for each type of allele
+        print("#SampleID\tgenotype_score\tsite_number")
+        for sample in samples:
+            if score_model == "avg":
+                genetic_score = np.mean(gs[sample], axis=0)  # Average
+            else:
+                genetic_score = np.sum(gs[sample], axis=0)   # sum
+            print("%s\t%f\t%d" % (sample, genetic_score, len(gs[k])))
 
     return
 
@@ -797,9 +807,6 @@ def phenotype_concat(in_gs_fn, in_pheno_file):
                 continue
 
             col = line.strip().split()
-            # for i in range(len(col)):
-            #     if col[i] == "-9" or col[i] == "-9.0":
-            #         col[i] = "NA"
 
             sample_id = col[0]
             if sample_id in gs_data:
