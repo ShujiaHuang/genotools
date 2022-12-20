@@ -32,6 +32,9 @@ def get_beta_value(fname):
             col[1] = col[1] if col[1].startswith("chr") else "chr" + col[1]
             pos = col[1] + ":" + col[2]
 
+            if len(col) < 6:
+                continue
+
             # [Effect allele, non-Effect allele, GWAS beta value]
             beta[pos] = [col[3].upper(), col[4].upper(), float(col[5])]
 
@@ -750,10 +753,12 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, score_model, is_dosage=F
 
                 g_score = g * beta
                 k = index2sample[i]
-                if k not in gs:
-                    gs[k] = []
 
-                gs[k].append(g_score)  # record score for each position
+                if k not in gs:
+                    gs[k] = [0, 0]
+
+                gs[k][0] += g_score  # sum the score for all position
+                gs[k][1] += 1        # record the number of variants 
 
     elapse_time = datetime.now() - START_TIME
     sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapse_time.seconds))
@@ -766,9 +771,9 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, score_model, is_dosage=F
         print("#SampleID\tgenotype_score\tsite_number")
         for sample in samples:
             if score_model == "avg":
-                genetic_score = np.mean(gs[sample], axis=0)  # Average
+                genetic_score = gs[sample][0] / gs[sample][1]  # PRS in average model
             else:
-                genetic_score = np.sum(gs[sample], axis=0)   # Sum
+                genetic_score = gs[sample][0]    # PRS in sum model
 
             print("%s\t%f\t%d" % (sample, genetic_score, len(gs[sample])))
 
