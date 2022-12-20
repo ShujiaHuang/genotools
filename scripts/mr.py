@@ -768,8 +768,9 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, score_model, is_dosage=F
             if score_model == "avg":
                 genetic_score = np.mean(gs[sample], axis=0)  # Average
             else:
-                genetic_score = np.sum(gs[sample], axis=0)   # sum
-            print("%s\t%f\t%d" % (sample, genetic_score, len(gs[k])))
+                genetic_score = np.sum(gs[sample], axis=0)   # Sum
+
+            print("%s\t%f\t%d" % (sample, genetic_score, len(gs[sample])))
 
     return
 
