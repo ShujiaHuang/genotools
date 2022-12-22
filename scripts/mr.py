@@ -717,8 +717,9 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, score_model, is_dosage=F
             # a1 is the effective allele, a2 is the non-effective allele.
             a1, a2, beta = pos_beta_value[pos]
             if (ref_allele + alt_allele != a1 + a2) and (alt_allele + ref_allele != a1 + a2):
-                raise ValueError("[ERROR] Alleles not matched: "
-                                 "[%s, %s] != [%s, %s]" % (ref_allele, alt_allele, a1, a2))
+                sys.stderr.write("[WARNING] Alleles not matched on %s: "
+                                 "[%s, %s] != [%s, %s]" % (pos, ref_allele, alt_allele, a1, a2))
+                continue
 
             if ref_allele == a1:
                 beta = -1.0 * beta
@@ -775,7 +776,7 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, score_model, is_dosage=F
             else:
                 genetic_score = gs[sample][0]    # PRS in sum model
 
-            print("%s\t%f\t%d" % (sample, genetic_score, len(gs[sample])))
+            print("%s\t%f\t%d" % (sample, genetic_score, gs[sample][1])))
 
     return
 
