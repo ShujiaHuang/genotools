@@ -603,7 +603,6 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, score
                     # Shuffle the list of child's genotype, we have 50% chance to match the 
                     # correct parent-of-origin in such situation
                     #np.random.shuffle(child_gt)
-
                  #   child_gt = [0, 1]
 
                 # `h1`: maternal transmitted allele/dosage
@@ -634,19 +633,20 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, score
                 # `s_h1`: maternal transmitted haplotype genetic score
                 # `s_h2`: maternal non-transmitted haplotype genetic score
                 # `s_h3`: paternal (fetal only) transmitted haplotype genetic score
-                # `s_mat`: maternal genotype score
-                # `s_fet`: fetal genotype score
+                # `s_mat`: maternal genotype score (not use any more 2022)
+                # `s_fet`: fetal genotype score (not use any more 2022)
                 s_h1 = h1 * beta
                 s_h2 = h2 * beta
                 s_h3 = h3 * beta
-                s_mat = mat * beta
-                s_fet = fet * beta
+                #s_mat = mat * beta
+                #s_fet = fet * beta
 
                 k = index2sample[m] + "_" + index2sample[c]
                 if k not in gs:
                     gs[k] = []
 
-                gs[k].append([s_mat, s_fet, s_h1, s_h2, s_h3])
+                #gs[k].append([s_mat, s_fet, s_h1, s_h2, s_h3])
+                gs[k].append([s_h1, s_h2, s_h3])
 
     elapse_time = datetime.now() - START_TIME
     sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapse_time.seconds))
@@ -656,18 +656,17 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, score
         sys.exit(1)
     else:
         # Calculate the PRS for each type of allele
-        print("#Mother\tChild\tmaternal_genotype_score\tchild_genotype_score\th1\th2\th3\tsite_number")
+        #print("#Mother\tChild\tmaternal_genotype_score\tchild_genotype_score\th1\th2\th3\tsite_number")
+        print("#Mother\tChild\th1\th2\th3\tsite_number")
         for m, c, _ in mother_child_idx:
             k = index2sample[m] + "_" + index2sample[c]
             if score_model == "avg":
                 genetic_score = np.mean(gs[k], axis=0)  # PRS in average model
             else:
                 genetic_score = np.sum(gs[k], axis=0)   # PRS in sum model
-                
-            print("%s\t%s\t%s\t%d" % (index2sample[m],
-                                      index2sample[c],
-                                      "\t".join(map(str, genetic_score)),
-                                      len(gs[k])))
+            
+            genetic_score_string = "\t".join(map(str, genetic_score))
+            print(f"{index2sample[m]}\t{index2sample[c]}\t{genetic_score_string}\t{len(gs[k])}")
 
     return
 
@@ -776,7 +775,7 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, score_model, is_dosage=F
             else:
                 genetic_score = gs[sample][0]    # PRS in sum model
 
-            print("%s\t%f\t%d" % (sample, genetic_score, gs[sample][1])))
+            print(f"{sample}\t{genetic_score}\t{gs[sample][1]}")
 
     return
 
@@ -821,7 +820,7 @@ def phenotype_concat(in_gs_fn, in_pheno_file):
 
 
 def regression(data, y_name, x_names, covar_names):
-    """
+    """ not use
     :param data: A dataframe
     :param y_name: column name for Y
     :param x_names: column names for X
@@ -928,3 +927,8 @@ if __name__ == "__main__":
 
     elapsed_time = datetime.now() - START_TIME
     sys.stderr.write("\n** process done, %d seconds elapsed **\n" % elapsed_time.seconds)
+
+
+
+
+
