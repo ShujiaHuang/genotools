@@ -26,10 +26,10 @@ class BedGenerator(object):
             # Merge
             self.last = pos
         else:
-            # bed format in 1-base 
+            # Output: bed format with 1-base
             print(self.chromosome, self.start, self.last, self.depth, sep="\t")
 
-            # reset valueble
+            # reset the value
             self.chromosome = chromo
             self.start = pos
             self.last = pos
@@ -69,12 +69,13 @@ if __name__ == "__main__":
 
         n += 1
         if n % 1000000 == 0:
-            sys.stderr.write("[INFO] Parsing position: {} - {} \n".format(chrom, pos))
+            sys.stderr.write(f"[INFO] Parsing {n} lines and hit: {chrom} - {pos}\n")
 
+    sys.stderr.write(f"[INFO] Parsed total {n} lines and hit the end position: {chrom} - {pos}\n")
     bed.out_last_pos()
 
     elapsed_time = datetime.now() - START_TIME
-    sys.stderr.write("\n** process done, %d seconds elapsed **\n" % elapsed_time.seconds)
+    sys.stderr.write(f"\n** process done, {elapsed_time.seconds} seconds elapsed **\n")
 
 
 
