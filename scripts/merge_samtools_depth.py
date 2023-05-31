@@ -28,6 +28,8 @@ class BedGenerator(object):
         else:
             # bed format in 1-base 
             print(self.chromosome, self.start, self.last, self.depth, sep="\t")
+
+            # reset valueble
             self.chromosome = chromo
             self.start = pos
             self.last = pos
@@ -45,6 +47,7 @@ if __name__ == "__main__":
     n = 0
     for line in sys.stdin:  # $ samtools depth --reference ref.fa in.cram | python merge_samtools_depth.py > out.bed
         """
+        Input:
         chr1    10004   1
         chr1    10005   1
         chr1    10006   1
@@ -52,6 +55,12 @@ if __name__ == "__main__":
         chr1    10008   2
         chr1    10009   2
         chr1    10010   3
+
+        Output:
+        chr1    10004   10006   1
+        chr1    10007   10009   2
+        chr1    10010   10010   3
+
         """
 
         col = line.strip().split()
