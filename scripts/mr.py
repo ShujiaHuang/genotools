@@ -210,9 +210,9 @@ def offspring_genotype_origin(data, fam_idx, index2sample):
     paternal_allele_origin = {}  # key value is the array index of child in VCF
     for d in data:
         for c, f, m in fam_idx:  # [KID, DAD, MOM]
+            child = d[c].split(":")
             father = d[f].split(":") if f is not None else None
             mother = d[m].split(":") if m is not None else None
-            child = d[c].split(":")
 
             if (("." in child[ind_format["GT"]]) or
                     (father and "." in father[ind_format["GT"]]) or
@@ -232,24 +232,25 @@ def offspring_genotype_origin(data, fam_idx, index2sample):
                                        d[c]])))
 
             # Genotype should be: "0|0", "0|1", "1|0" or "1|1"
+            child_gt = child[ind_format["GT"]]
             father_gt = father[ind_format["GT"]] if father else None
             mother_gt = mother[ind_format["GT"]] if mother else None
-            child_gt = child[ind_format["GT"]]
 
             if c not in paternal_allele_origin:
                 # Key value is the index of child in VCF line. [genotype_index, is_clear_origin]
-                is_error_genotype_match, paternal_allele_origin[c] = False, [0, False]
+                is_error_genotype_match, paternal_allele_origin[c] = False, [None, False]
 
             if paternal_allele_origin[c][1]:
-                # the parent-of-origin of child's GT is clear, do nothing for this individual
+                # the parent-of-origin of child's GT is already set, do nothing for this individual
                 continue
 
             if father_gt is None or mother_gt is None:
-                # duo
                 if mother_gt:
+                    # maternal-child pair
                     is_error_genotype_match, paternal_allele_origin[c] = paternal_allele_origin_by_duo(
                         child_gt, mother_gt, is_paternal_gt=False)
                 elif father_gt:
+                    # paternal-child pair
                     is_error_genotype_match, paternal_allele_origin[c] = paternal_allele_origin_by_duo(
                         child_gt, father_gt, is_paternal_gt=True)
                 else:
@@ -503,7 +504,7 @@ def distinguish_origin(in_vcf_fn, fam, is_dosage=False):
 
 def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, score_model, is_dosage=False):
     sample2index, index2sample = {}, {}
-    gs, af_beta = {}, {}
+    gs = {}
     mother_child_idx = []
     n = 0
     with gzip.open(in_vcf_fn, "rt") if in_vcf_fn.endswith(".gz") else open(in_vcf_fn, "rt") as IN:
@@ -528,8 +529,8 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, score
                         if (mid not in sample2index) or (sid not in sample2index):
                             raise ValueError("[ERROR] %s or %s not in VCF" % (mid, sid))
 
-                        k = mid + "_" + sid  # mother-child
-                        gs[k], af_beta[k] = [], []
+                        # k = mid + "_" + sid  # mother-child
+                        # gs[k], af_beta[k] = [], []
 
                         is_trio = True if (fid != "0" and mid != "0") else False
                         mother_child_idx.append([sample2index[mid], sample2index[sid], is_trio])
@@ -595,15 +596,15 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, score
                     # Mendelian error
                     continue
 
-                #is_duo = not is_trio
-                #if is_duo and (sum(mother_gt) == 1) and (sum(child_gt) == 1):  # 0,1 => 0,1
-                    # Can not distinguish the maternal allele
-                    # continue
+                # is_duo = not is_trio
+                # if is_duo and (sum(mother_gt) == 1) and (sum(child_gt) == 1):  # 0,1 => 0,1
+                # Can not distinguish the maternal allele
+                # continue
 
-                    # Shuffle the list of child's genotype, we have 50% chance to match the 
-                    # correct parent-of-origin in such situation
-                    #np.random.shuffle(child_gt)
-                 #   child_gt = [0, 1]
+                # Shuffle the list of child's genotype, we have 50% chance to match the
+                # correct parent-of-origin in such situation
+                # np.random.shuffle(child_gt)
+                #   child_gt = [0, 1]
 
                 # `h1`: maternal transmitted allele/dosage
                 # `h2`: maternal non-transmitted allele/dosage
@@ -626,27 +627,32 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, score
                 else:
                     mat = sum(mother_gt)
                     fet = sum(child_gt)
+
                     h1 = child_gt[1]  # The parent-of-origin allele of child has been distinguish by `TTC` process.
                     h2 = mother_gt[0] if mother_gt[0] != child_gt[1] else mother_gt[1]
                     h3 = child_gt[0]
 
+                # `s_mat`: maternal genotype score (not use after 2022)
+                # `s_fet`: fetal genotype score (not use after 2022)
                 # `s_h1`: maternal transmitted haplotype genetic score
                 # `s_h2`: maternal non-transmitted haplotype genetic score
                 # `s_h3`: paternal (fetal only) transmitted haplotype genetic score
-                # `s_mat`: maternal genotype score (not use any more 2022)
-                # `s_fet`: fetal genotype score (not use any more 2022)
+                s_mat = mat * beta
+                s_fet = fet * beta
                 s_h1 = h1 * beta
                 s_h2 = h2 * beta
                 s_h3 = h3 * beta
-                #s_mat = mat * beta
-                #s_fet = fet * beta
 
                 k = index2sample[m] + "_" + index2sample[c]
                 if k not in gs:
-                    gs[k] = []
+                    gs[k] = [0, 0, 0, 0, 0, 0]  # [s_mat_sum, s_fet_sum, s_h1_sum, s_h2_sum, s_h3_sum, number]
 
-                #gs[k].append([s_mat, s_fet, s_h1, s_h2, s_h3])
-                gs[k].append([s_h1, s_h2, s_h3])
+                gs[k][0] += s_mat
+                gs[k][1] += s_fet
+                gs[k][2] += s_h1
+                gs[k][3] += s_h2
+                gs[k][4] += s_h3
+                gs[k][5] += 1
 
     elapse_time = datetime.now() - START_TIME
     sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapse_time.seconds))
@@ -656,17 +662,16 @@ def calculate_genotype_and_haplotype_score(in_vcf_fn, pos_beta_value, fam, score
         sys.exit(1)
     else:
         # Calculate the PRS for each type of allele
-        #print("#Mother\tChild\tmaternal_genotype_score\tchild_genotype_score\th1\th2\th3\tsite_number")
-        print("#Mother\tChild\th1\th2\th3\tsite_number")
+        print("#Mother\tChild\tmaternal_genotype_score\tchild_genotype_score\th1\th2\th3\tsite_number")
         for m, c, _ in mother_child_idx:
             k = index2sample[m] + "_" + index2sample[c]
+            mat_sum, fet_sum, h1_sum, h2_sum, h3_sum, number = gs[k]
+            genetic_score = np.array([mat_sum, fet_sum, h1_sum, h2_sum, h3_sum])  # PRS in sum model
             if score_model == "avg":
-                genetic_score = np.mean(gs[k], axis=0)  # PRS in average model
-            else:
-                genetic_score = np.sum(gs[k], axis=0)   # PRS in sum model
-            
+                genetic_score /= number  # PRS in average model
+
             genetic_score_string = "\t".join(map(str, genetic_score))
-            print(f"{index2sample[m]}\t{index2sample[c]}\t{genetic_score_string}\t{len(gs[k])}")
+            print(f"{index2sample[m]}\t{index2sample[c]}\t{genetic_score_string}\t{number}")
 
     return
 
@@ -758,7 +763,7 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, score_model, is_dosage=F
                     gs[k] = [0, 0]
 
                 gs[k][0] += g_score  # sum the score for all position
-                gs[k][1] += 1        # record the number of variants 
+                gs[k][1] += 1  # record the number of variants
 
     elapse_time = datetime.now() - START_TIME
     sys.stderr.write("[INFO] All %d records loaded, %d seconds elapsed.\n" % (n, elapse_time.seconds))
@@ -773,7 +778,7 @@ def calculate_genotype_score(in_vcf_fn, pos_beta_value, score_model, is_dosage=F
             if score_model == "avg":
                 genetic_score = gs[sample][0] / gs[sample][1]  # PRS in average model
             else:
-                genetic_score = gs[sample][0]    # PRS in sum model
+                genetic_score = gs[sample][0]  # PRS in sum model
 
             print(f"{sample}\t{genetic_score}\t{gs[sample][1]}")
 
@@ -927,8 +932,3 @@ if __name__ == "__main__":
 
     elapsed_time = datetime.now() - START_TIME
     sys.stderr.write("\n** process done, %d seconds elapsed **\n" % elapsed_time.seconds)
-
-
-
-
-
