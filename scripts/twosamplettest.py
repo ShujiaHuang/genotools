@@ -33,7 +33,7 @@ if __name__ == "__main__":
     t_value = delta_mean / delta_std
 
     # adjusted the degrees of freedom
-    df = (se1**2 + se2**2) / (se1**4/(n1 - 1) + se2**4/(n2 - 1))
+    df = (se1**2 + se2**2)**2 / (se1**4/(n1 - 1) + se2**4/(n2 - 1))
 
     one_tail_p_value = sp.stats.t.cdf(x=t_value, df=df)
     if one_tail_p_value > 0.5:
@@ -41,10 +41,16 @@ if __name__ == "__main__":
 
 
     p_value = 2 * one_tail_p_value if is_two_tail == '2' else one_tail_p_value
+    print(f"DD: {delta_mean}\t{delta_std}\t{t_value}\t{df}\t{p_value}")
 
+    print(f"delta_mean: {delta_mean}")
+    print(f"standard deviation: {delta_std}")
+    print(f"T value: {t_value}")
+    print(f"Degree of freedom: {df}")  
+    # print(f"CI: {delta_mean - 2 * delta_std}, {delta_mean + 2 * delta_std}")
     print(f"sample1: {mean1}, {se1}, {n1}")
     print(f"sample2: {mean2}, {se2}, {n2}")
-    print(f"Two-sample t-test: {p_value}")
+    print(f"Two-sample t-test: {p_value}\n")
 
 
 
