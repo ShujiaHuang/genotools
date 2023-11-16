@@ -1,3 +1,12 @@
+## Detection of age-specific genetic effects on lipid levels among mothers and infants
+
+We examined age-specific genetic influence on lipid levels between maternal and infant subjects with a two-sided two-sample t-test (see Code Availability) that tests the equivalence of genetic effects on the same traits between mothers and infants (Figure 5, Table S9) with the following hypotheses:
+
+Null hypothesis H_0: β_m = β_i
+Alternative hypothesis H_1: β_m ≠ β_i
+
+
+
 ```bash
 #2.78e-9
 #python twosamplettest.py 0.4184,0.0677,1535 0.194675702,0.075442627,1457 2
@@ -28,3 +37,5 @@ python twosamplettest.py -0.7081,0.0618,1455 -0.792575853,0.06063332,1532 2
 python twosamplettest.py -0.3597,0.0630,1442 -0.2297,0.0567,1531 2
 python twosamplettest.py -0.2362,0.0422,1442 -0.0279,0.0389,1531 2
 ```
+
+

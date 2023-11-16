@@ -13,7 +13,7 @@ if __name__ == "__main__":
                            # help="Statistic data of sample1. input format: mean,SE,samplesize")
     # cmdparser.add_argument("sample2", type=str, required=True,
                            # help="Statistic data of sample2. input format: mean,SE,samplesize")
-    # cmdparser.add_argument("--two-tail-test", dest="is_two_tail", action="store_true",
+    # cmdparser.add_argument("--two-silde-test", dest="is_two_silde", action="store_true",
                            # help="Set this option to perform two tail two-sample t-test.")
     # args = cmdparser.parse_args()
     # mean1, se1, n1 = list(map(float, args.sample1.split(",")))
@@ -21,7 +21,7 @@ if __name__ == "__main__":
 
     mean1, se1, n1 = list(map(float, sys.argv[1].split(",")))
     mean2, se2, n2 = list(map(float, sys.argv[2].split(",")))
-    is_two_tail = sys.argv[3]
+    is_two_silde = sys.argv[3]
 
 
     # Null hypothesis (H0): mean1 == mean2
@@ -35,12 +35,12 @@ if __name__ == "__main__":
     # adjusted the degrees of freedom
     df = (se1**2 + se2**2)**2 / (se1**4/(n1 - 1) + se2**4/(n2 - 1))
 
-    one_tail_p_value = sp.stats.t.cdf(x=t_value, df=df)
-    if one_tail_p_value > 0.5:
-        one_tail_p_value = 1 - one_tail_p_value
+    one_silde_p_value = sp.stats.t.cdf(x=t_value, df=df)
+    if one_silde_p_value > 0.5:
+        one_silde_p_value = 1 - one_silde_p_value
 
 
-    p_value = 2 * one_tail_p_value if is_two_tail == '2' else one_tail_p_value
+    p_value = 2 * one_silde_p_value if is_two_silde == '2' else one_silde_p_value
     print(f"DD: {delta_mean}\t{delta_std}\t{t_value}\t{df}\t{p_value}")
 
     print(f"delta_mean: {delta_mean}")
