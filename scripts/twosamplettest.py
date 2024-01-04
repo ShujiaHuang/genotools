@@ -41,7 +41,7 @@ if __name__ == "__main__":
 
 
     p_value = 2 * one_silde_p_value if is_two_silde == '2' else one_silde_p_value
-    print(f"DD: {delta_mean}\t{delta_std}\t{t_value}\t{df}\t{p_value}")
+    print(f"[{sys.argv[1]} - {sys.argv[2]}]\nDD: {delta_mean}\t{delta_std}\t{t_value}\t{df}\t{p_value}")
 
     print(f"delta_mean: {delta_mean}")
     print(f"standard deviation: {delta_std}")
