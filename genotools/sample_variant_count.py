@@ -37,7 +37,7 @@ if __name__ == "__main__":
                 sys.stderr.write("[INFO] Processing %d records done, " 
                                  "%d seconds elapsed\n" % (n, elapsed_time.seconds))
 
-            col = line.strip().split()
+            col = line.strip().split('\t')
             ref = col[3]
             alt = col[4].split(",")  # may be multiple variants
             variant_type = {str(i+1): len(a)-len(ref) for i, a in enumerate(alt)}
