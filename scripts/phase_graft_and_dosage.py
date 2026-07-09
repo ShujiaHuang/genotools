@@ -104,28 +104,32 @@ def harmonize_cohorts(unphased_in: str, phased_in: str, output_out: str, threads
     # Note: pysam automatically auto-detects input formats (.vcf, .vcf.gz, .bcf) using standard mode 'r'
     with pysam.VariantFile(unphased_in, "r", threads=threads) as unphased_vcf, \
          pysam.VariantFile(phased_in, "r", threads=threads) as phased_vcf:
-         
-        # Harmonize metadata headers
+
         header = unphased_vcf.header
-        header.formats.add("GP", "G", "Float", "Genotype Probabilities derived strictly from PL")
-        header.formats.add("DS", "1", "Float", "Alternate Allele Dosage calculated from GP")
-        
-        # Verify cohort sample alignment across files
+        if "GT" not in header.formats:
+            header.formats.add("GT", "1", "String", "Genotype")
+        if "GP" not in header.formats:
+            header.formats.add("GP", "G", "Float", "Genotype Probabilities derived strictly from PL")
+        if "DS" not in header.formats:
+            header.formats.add("DS", "1", "Float", "Alternate Allele Dosage calculated from GP")
+
         unphased_samples = list(unphased_vcf.header.samples)
         phased_samples = list(phased_vcf.header.samples)
-        if unphased_samples != phased_samples:
-            logger.error(f"Sample mismatch error! Unphased cohort size: {len(unphased_samples)}, "
-                         f"Phased cohort size: {len(phased_samples)}.")
+        if set(unphased_samples) != set(phased_samples):
+            logger.error(
+                f"Sample mismatch error! Unphased samples: {unphased_samples[:5]}..., "
+                f"Phased samples: {phased_samples[:5]}..."
+            )
             sys.exit(1)
-            
+
         logger.info(f"Cohort validation complete ({len(unphased_samples)} samples matched). Executing stream...")
-        
+
         processed_count = 0
         with pysam.VariantFile(output_out, write_mode, header=header, threads=threads) as out_vcf:
-            # Sync streams variant-by-variant to maintain O(1) memory footprint
-            for u_rec, p_rec in zip(unphased_vcf, phased_vcf):
-                
-                # Strict genomic coordinate validation to trap upstream sorting or filtering discrepancies
+            u_rec = next(unphased_vcf, None)
+            p_rec = next(phased_vcf, None)
+
+            while u_rec is not None and p_rec is not None:
                 if u_rec.contig != p_rec.contig or u_rec.pos != p_rec.pos:
                     logger.critical(
                         f"CRITICAL DESYNCHRONIZATION DETECTED!\n"
@@ -134,31 +138,39 @@ def harmonize_cohorts(unphased_in: str, phased_in: str, output_out: str, threads
                         f"Please ensure both input files contain identical variants and sorting orders."
                     )
                     sys.exit(1)
-                
-                # Batch processing of samples within the current variant row
+
                 for sample in unphased_samples:
                     u_fmt = u_rec.samples[sample]
                     p_fmt = p_rec.samples[sample]
-                    
-                    # 1. Physical Phase Grafting
-                    u_fmt['GT'] = p_fmt['GT']
-                    u_fmt.phased = p_fmt.phased
-                    
-                    # 2. Mathematical Genotype Dosage Reconstruction
-                    pl = u_fmt.get('PL')
+
+                    gt = p_fmt.get("GT")
+                    if gt is not None:
+                        u_fmt["GT"] = gt
+
+                    phased_flag = getattr(p_fmt, "phased", False)
+                    u_fmt.phased = phased_flag
+
+                    pl = u_fmt.get("PL")
                     if pl is not None:
                         gp, ds = calculate_gp_ds(pl)
                         if gp is not None:
-                            u_fmt['GP'] = gp
+                            u_fmt["GP"] = gp
                         if ds is not None:
-                            u_fmt['DS'] = ds
-                            
+                            u_fmt["DS"] = ds
+
                 out_vcf.write(u_rec)
                 processed_count += 1
-                
+
                 if processed_count % 50000 == 0:
                     logger.info(f"Successfully processed {processed_count} genomic variants.")
-                    
+
+                u_rec = next(unphased_vcf, None)
+                p_rec = next(phased_vcf, None)
+
+            if u_rec is not None or p_rec is not None:
+                logger.error("Input files contain a different number of records; processing stopped early.")
+                sys.exit(1)
+
     logger.info(f"Execution finished. Total processed variants: {processed_count}.")
 
 
