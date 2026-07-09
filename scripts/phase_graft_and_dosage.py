@@ -121,7 +121,6 @@ def harmonize_cohorts(unphased_in: str, phased_in: str, output_out: str, threads
         logger.info(f"Cohort validation complete ({len(unphased_samples)} samples matched). Executing stream...")
         
         processed_count = 0
-        
         with pysam.VariantFile(output_out, write_mode, header=header, threads=threads) as out_vcf:
             # Sync streams variant-by-variant to maintain O(1) memory footprint
             for u_rec, p_rec in zip(unphased_vcf, phased_vcf):
