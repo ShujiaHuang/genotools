@@ -433,7 +433,10 @@ def _harmonize_parallel(unphased_in, phased_in, output_out, write_mode, num_work
     )
 
     # ── 3. Prepare temp directory for intermediate outputs ──
-    temp_dir = tempfile.mkdtemp(prefix="vcf_harmonize_")
+    #     Place under the output file's directory instead of system /tmp to
+    #     avoid tmpfs size limits on HPC nodes.
+    output_dir = os.path.dirname(os.path.abspath(output_out))
+    temp_dir = tempfile.mkdtemp(prefix="vcf_harmonize_", dir=output_dir)
     atexit.register(shutil.rmtree, temp_dir, ignore_errors=True)
 
     if output_out.endswith('.bcf'):
