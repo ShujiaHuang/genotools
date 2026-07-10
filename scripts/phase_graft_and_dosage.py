@@ -312,8 +312,12 @@ def _process_region_worker(args):
 
                     try:
                         if start is not None and end is not None:
-                            u_iter = unphased_vcf.fetch(contig, start, end)
-                            p_iter = phased_vcf.fetch(contig, start, end)
+                            # pysam.fetch() uses 0-based half-open coordinates.
+                            # _build_region_chunks emits 1-based [start, end];
+                            # subtract 1 from start to avoid silently dropping
+                            # the first variant of every position-range chunk.
+                            u_iter = unphased_vcf.fetch(contig, start - 1, end)
+                            p_iter = phased_vcf.fetch(contig, start - 1, end)
                         else:
                             u_iter = unphased_vcf.fetch(contig)
                             p_iter = phased_vcf.fetch(contig)
