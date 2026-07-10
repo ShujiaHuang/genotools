@@ -1,15 +1,17 @@
-import importlib.util
+import importlib
+import sys
 from pathlib import Path
 
 import pysam
 import pytest
 
+# Ensure the scripts directory is on sys.path so that multiprocessing
+# workers can re-import the module when using the 'spawn' start method.
+_SCRIPTS_DIR = str(Path(__file__).resolve().parents[1] / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "phase_graft_and_dosage.py"
-SPEC = importlib.util.spec_from_file_location("phase_graft_and_dosage", MODULE_PATH)
-phase_graft_and_dosage = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(phase_graft_and_dosage)
+phase_graft_and_dosage = importlib.import_module("phase_graft_and_dosage")
 
 
 def build_test_vcf(path: Path, samples: list[str], *, phased: bool) -> None:
