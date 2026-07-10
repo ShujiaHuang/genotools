@@ -361,7 +361,13 @@ def _process_region_worker(args):
                             f"Region '{label}': record count mismatch between input files."
                         )
 
-        worker_logger.info(f"Completed. Processed {processed} variants across {len(contigs)} contig(s).")
+        # Build concise region labels for the completion log
+        region_labels = [f"{c[0]}:{c[1]}-{c[2]}" if isinstance(c, tuple) else c for c in contigs[:5]]
+        suffix = f", ... ({len(contigs)} total)" if len(contigs) > 5 else ""
+        worker_logger.info(
+            f"Completed. Processed {processed} variants across "
+            f"{', '.join(region_labels)}{suffix}."
+        )
     except Exception:
         worker_logger.exception("Worker encountered a fatal error.")
         raise
@@ -455,6 +461,7 @@ def _harmonize_parallel(unphased_in, phased_in, output_out, write_mode, num_work
     try:
         with multiprocessing.Pool(processes=actual_workers) as pool:
             results = pool.map(_process_region_worker, worker_args)
+            
         total = sum(r for r in results if isinstance(r, int))
         if total == 0:
             logger.error("All workers returned zero variants; aborting.")
