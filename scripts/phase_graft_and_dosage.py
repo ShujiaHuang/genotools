@@ -336,6 +336,21 @@ def _process_region_worker(args):
                             )
                             break
 
+                        # ── Position-range boundary filter ──
+                        # pysam.fetch() may return records whose POS falls
+                        # outside the assigned region when the tabix index
+                        # spans a chunk boundary (e.g. large deletions with
+                        # long REF alleles indexed across multiple bins).
+                        # Explicitly skip them to prevent duplicate output.
+                        if start is not None and (u_rec.pos < start or u_rec.pos > end):
+                            worker_logger.debug(
+                                f"Record {u_rec.contig}:{u_rec.pos} outside "
+                                f"assigned region [{start}, {end}]; skipping."
+                            )
+                            u_rec = next(u_iter, None)
+                            p_rec = next(p_iter, None)
+                            continue
+
                         for sample in unphased_samples:
                             u_fmt = u_rec.samples[sample]
                             p_fmt = p_rec.samples[sample]
@@ -395,13 +410,27 @@ def _merge_temp_files(temp_files, output_path, write_mode):
         header = first.header
 
     merged_count = 0
+    dupe_count = 0
+    last_key: tuple = ()
     with pysam.VariantFile(output_path, write_mode, header=header) as out_vcf:
         for temp_file in temp_files:
             with pysam.VariantFile(temp_file) as tf:
                 for rec in tf:
+                    curr_key = (rec.contig, rec.pos)
+                    if curr_key == last_key:
+                        dupe_count += 1
+                        logger.warning(
+                            f"Duplicate record at {rec.contig}:{rec.pos} — "
+                            f"likely caused by tabix bin overlap at chunk boundary."
+                        )
                     out_vcf.write(rec)
                     merged_count += 1
+                    last_key = curr_key
 
+    if dupe_count:
+        logger.warning(
+            f"Detected {dupe_count} duplicate record(s) across chunk boundaries."
+        )
     logger.info(f"Merge complete: {merged_count} total variants written to output.")
 
 
