@@ -279,7 +279,6 @@ def _process_region_worker(args):
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     worker_logger = logging.getLogger("VCF_Harmonizer.Worker")
-
     worker_logger.info(
         f"Assigned {len(contigs)} region(s): "
         f"{str(contigs[:5])[:-1]}{', ...' if len(contigs) > 5 else ']'}"
@@ -376,17 +375,13 @@ def _process_region_worker(args):
                         p_rec = next(p_iter, None)
 
                     if u_rec is not None or p_rec is not None:
-                        worker_logger.warning(
-                            f"Region '{label}': record count mismatch between input files."
-                        )
+                        worker_logger.warning(f"Region '{label}': record count mismatch between input files.")
 
         # Build concise region labels for the completion log
         region_labels = [f"{c[0]}:{c[1]}-{c[2]}" if isinstance(c, tuple) else c for c in contigs[:5]]
         suffix = f", ... ({len(contigs)} total)" if len(contigs) > 5 else ""
-        worker_logger.info(
-            f"Completed. Processed {processed} variants across "
-            f"{', '.join(region_labels)}{suffix}."
-        )
+        worker_logger.info(f"Completed. Processed {processed} variants across {', '.join(region_labels)}{suffix}.")
+        
     except Exception:
         worker_logger.exception("Worker encountered a fatal error.")
         raise
