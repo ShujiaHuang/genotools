@@ -35,19 +35,53 @@ binomial variance under HWE, so INFO is the IMPUTE2-style imputation R^2 score.
 INFO/RAF (reference-panel frequency) is independent of target samples and is
 left untouched.
 
+Two sub-commands
+----------------
+recompute  (single-file method)
+    Recompute AF/INFO from the FULL-cohort per-sample GP of one merged file, using
+    the formula above. Correct for common variants, but note that GLIMPSE stores
+    GP floored to 3 decimals (phase/src/io/genotype_writer.cpp). For very rare
+    variants that quantisation biases the recovered INFO downward and can collapse
+    a true 0.2 to 0. Use only when nothing but the final merged file is available.
+
+aggregate  (per-batch method, accurate for rare variants)
+    Combine the per-batch AF/INFO that GLIMPSE already computed at full internal
+    precision, instead of re-deriving them from the lossy 3-decimal GP. Because
+    the per-sample posterior-variance sum is additive across samples, the exact
+    cohort statistics are recovered from each batch's written AF_b/INFO_b:
+
+        n_hap   = sum_b (2 * N_b)                         # total haplotypes
+        ds_sum  = sum_b AF_b * (2*N_b)                     # AF_b is float32 (near-exact)
+        Var_b   = (1 - INFO_b) * (2*N_b) * AF_b*(1-AF_b)   # per-batch variance sum
+        var_sum = sum_b Var_b
+        AF      = ds_sum / n_hap
+        INFO    = 1 - var_sum / (n_hap * AF*(1-AF))        for 0<AF<1, else 1
+
+    This is exact up to INFO_b's 3-decimal rounding (~1e-3), so it stays accurate
+    even in the rare-variant tail where `recompute` fails. It needs the per-batch
+    files (identical site sets) plus one full-cohort file whose records and GP are
+    kept; only that file's AF/INFO are overwritten.
+
 Design
 ------
-Uses pysam and per-region multiprocessing (contig-level, or position-range
-splitting for single-chromosome inputs), following the same parallel pattern as
-phase_graft_and_dosage.py. Each worker recomputes its region into a temporary
-file; the temporaries are then concatenated in genomic order.
+Both sub-commands use pysam with per-region multiprocessing (contig-level, or
+position-range splitting derived from a lightweight POS-only scan for single-
+chromosome / single-region inputs), following the same parallel pattern as
+phase_graft_and_dosage.py. Each worker writes its region to a temporary file and
+the temporaries are concatenated in genomic order.
 
 Author: Shujia Huang
 
 Examples
 --------
-    python recompute_glimpse_info.py -i final.raw.vcf.gz -o final.vcf.gz -t 16
-    python recompute_glimpse_info.py -i final.raw.bcf    -o final.bcf     -t 8
+    # Single-file recompute (final merged file only; rare-variant INFO approximate)
+    python recompute_glimpse_info.py recompute -i final.raw.vcf.gz -o final.vcf.gz -t 16
+
+    # Per-batch aggregate (accurate; run per chunk before the batch files are deleted)
+    python recompute_glimpse_info.py aggregate \
+        --records-from imputed_chunk_0.bcf \
+        --batch-inputs imputed_chunk_0_b000.bcf imputed_chunk_0_b001.bcf \
+        -o imputed_chunk_0.fixed.bcf -t 8
 """
 
 import os
@@ -555,27 +589,400 @@ def recompute_info(input_in: str, output_out: str, threads: int,
         _recompute_sequential(input_in, output_out, write_mode, af_tag, info_tag, decimals)
 
 
+# =============================================================================
+# Sub-command 2: aggregate
+# -----------------------------------------------------------------------------
+# Instead of re-deriving AF/INFO from the merged file's lossy 3-decimal GP
+# (the `recompute` path above), combine the per-batch AF_b/INFO_b that GLIMPSE
+# already wrote at full internal precision. See the module docstring for the
+# derivation. This is the accurate path for rare variants and is meant to run
+# per chunk, right after `bcftools merge` and BEFORE the per-batch files are
+# deleted, so their AF/INFO are still available.
+# =============================================================================
+
+def _get_info_scalar(rec, tag):
+    """
+    Read a single INFO value. GLIMPSE's AF/INFO are Number=A, which pysam returns
+    as a 1-tuple; this normalises both tuple and plain-scalar returns to a float,
+    or None when the tag (or the record) is absent.
+    """
+    if rec is None:
+        return None
+    val = rec.info.get(tag)
+    if val is None:
+        return None
+    if isinstance(val, (tuple, list)):
+        return val[0] if len(val) > 0 else None
+    return val
+
+
+def _aggregate_record(rec, batch_recs, n_haps, n_hap_total, af_tag, info_tag, decimals):
+    """
+    Overwrite rec.info[af_tag]/rec.info[info_tag] with the exact cohort AF/INFO
+    reconstructed from the per-batch AF_b/INFO_b. Returns True on success, or
+    False if a batch value is unusable (then the record keeps GLIMPSE's value).
+
+    Key identity: the per-sample posterior-variance sum is additive across
+    samples, so summing each batch's variance term Var_b gives the exact cohort
+    numerator. AF_b is stored by GLIMPSE as float32 (no rounding), so ds_sum is
+    near-exact; the only loss is INFO_b's 3-decimal rounding inside Var_b.
+    """
+    ds_sum = 0.0
+    var_sum = 0.0
+    for brec, nhap in zip(batch_recs, n_haps):
+        af_b = _get_info_scalar(brec, af_tag)
+        if af_b is None:
+            # Without this batch's AF the cohort dosage mass is incomplete -> abort.
+            return False
+        # ds_sum_b = AF_b * (2*N_b): recover the batch dosage sum.
+        ds_sum += af_b * nhap
+        # Var_b is non-zero only for a polymorphic batch; GLIMPSE emits INFO_b = 1
+        # (=> Var_b = 0) whenever AF_b is exactly 0 or 1, so we skip those.
+        if 0.0 < af_b < 1.0:
+            info_b = _get_info_scalar(brec, info_tag)
+            if info_b is None:
+                info_b = 1.0
+            # Invert GLIMPSE's definition INFO_b = 1 - Var_b/(nhap_b*AF_b*(1-AF_b)).
+            var_sum += (1.0 - info_b) * nhap * af_b * (1.0 - af_b)
+
+    if n_hap_total <= 0:
+        return False
+
+    af = ds_sum / n_hap_total
+    if 0.0 < af < 1.0:
+        info = 1.0 - var_sum / (n_hap_total * af * (1.0 - af))
+    else:
+        info = 1.0
+    if info < 0.0:
+        info = 0.0
+
+    # INFO fields are Number=A; write single-element tuples for the ALT allele.
+    rec.info[af_tag] = (round(af, 6),)
+    rec.info[info_tag] = (round(info, decimals),)
+    return True
+
+
+def _consume_batch_records_at(pos, ref, alts, batch_iters, batch_cur):
+    """
+    Advance each per-batch iterator to `pos` and, if its head record matches the
+    site (same POS/REF/ALT), consume and return it. `batch_cur` is the per-iterator
+    look-ahead buffer and is mutated in place.
+
+    Returns (batch_records, all_matched): batch_records[k] is batch k's matching
+    record (or None), and all_matched is True only when every batch supplied one.
+    Since all batches are imputed against the same reference chunk their site sets
+    are identical, so all_matched is True in the normal case; the per-position
+    advance also keeps things aligned across boundary-skipped or multiallelic rows.
+    """
+    brecs = []
+    all_matched = True
+    for k in range(len(batch_iters)):
+        cur = batch_cur[k]
+        # Skip any batch records preceding pos (e.g. tabix bin spill at chunk edges,
+        # or a main record that was boundary-skipped just before this one).
+        while cur is not None and cur.pos < pos:
+            cur = next(batch_iters[k], None)
+        if (cur is not None and cur.pos == pos
+                and cur.ref == ref and cur.alts == alts):
+            brecs.append(cur)
+            batch_cur[k] = next(batch_iters[k], None)  # consume the matched record
+        else:
+            brecs.append(None)
+            batch_cur[k] = cur                         # keep head for the next site
+            all_matched = False
+    return brecs, all_matched
+
+
+def _aggregate_region_worker(args):
+    """
+    Multiprocessing worker for `aggregate`.
+
+    For its assigned region(s) it walks the full-cohort records-from file and, in
+    lockstep, the matching records of every per-batch file, then writes each
+    records-from record with AF/INFO replaced by the cohort aggregate. Runs in a
+    child process and writes to its own temporary file.
+    """
+    (records_from_path, batch_paths, temp_output_path, regions, write_mode,
+     n_haps, af_tag, info_tag, decimals) = args
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(asctime)s] %(levelname)s [Worker-%(process)d] - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    worker_logger = logging.getLogger("GLIMPSE_INFO_Recompute.Aggregate.Worker")
+
+    n_hap_total = sum(n_haps)
+    processed = 0
+    updated = 0
+    try:
+        main_vcf = pysam.VariantFile(records_from_path)
+        batch_vcfs = [pysam.VariantFile(p) for p in batch_paths]
+        try:
+            header = main_vcf.header  # shared object -> records write without translation
+            _ensure_info_headers(header, af_tag, info_tag)
+
+            with pysam.VariantFile(temp_output_path, write_mode, header=header) as vcf_out:
+                for item in regions:
+                    if isinstance(item, tuple):
+                        contig, start, end = item
+                    else:
+                        contig, start, end = item, None, None
+
+                    # One iterator per file over the SAME region. pysam.fetch() uses
+                    # 0-based half-open coordinates; our ranges are 1-based inclusive,
+                    # hence start-1.
+                    try:
+                        if start is not None:
+                            main_it = main_vcf.fetch(contig, start - 1, end)
+                            batch_iters = [bv.fetch(contig, start - 1, end) for bv in batch_vcfs]
+                        else:
+                            main_it = main_vcf.fetch(contig)
+                            batch_iters = [bv.fetch(contig) for bv in batch_vcfs]
+                    except (ValueError, OSError):
+                        worker_logger.debug(f"Region '{contig}' not accessible via index; skipping.")
+                        continue
+
+                    # Look-ahead buffer holding each batch iterator's current head.
+                    batch_cur = [next(it, None) for it in batch_iters]
+
+                    for rec in main_it:
+                        pos = rec.pos
+                        # Boundary guard: drop records outside the assigned range so
+                        # adjacent chunks never emit the same site twice. The next
+                        # in-range record re-syncs the batch iterators via advance.
+                        if start is not None and (pos < start or pos > end):
+                            continue
+
+                        alts = rec.alts
+                        brecs, all_matched = _consume_batch_records_at(
+                            pos, rec.ref, alts, batch_iters, batch_cur)
+
+                        # Only biallelic sites present in every batch are aggregated;
+                        # anything else keeps GLIMPSE's original value untouched.
+                        if alts is not None and len(alts) == 1 and all_matched:
+                            if _aggregate_record(rec, brecs, n_haps, n_hap_total,
+                                                 af_tag, info_tag, decimals):
+                                updated += 1
+                        vcf_out.write(rec)
+                        processed += 1
+        finally:
+            main_vcf.close()
+            for bv in batch_vcfs:
+                bv.close()
+
+        worker_logger.info(f"Aggregate region done: {processed} variants written, "
+                           f"{updated} AF/INFO aggregated.")
+    except Exception:
+        worker_logger.exception("Aggregate worker encountered a fatal error.")
+        raise
+
+    return processed
+
+
+def _aggregate_sequential(records_from, batch_inputs, output_out, write_mode,
+                          n_haps, af_tag, info_tag, decimals):
+    """Single-process streaming aggregation (used when threads == 1)."""
+    n_hap_total = sum(n_haps)
+    main_vcf = pysam.VariantFile(records_from)
+    batch_vcfs = [pysam.VariantFile(p) for p in batch_inputs]
+    processed = 0
+    updated = 0
+    try:
+        header = main_vcf.header
+        _ensure_info_headers(header, af_tag, info_tag)
+        batch_iters = [iter(bv) for bv in batch_vcfs]
+        batch_cur = [next(it, None) for it in batch_iters]
+        with pysam.VariantFile(output_out, write_mode, header=header) as vcf_out:
+            for rec in main_vcf:
+                brecs, all_matched = _consume_batch_records_at(
+                    rec.pos, rec.ref, rec.alts, batch_iters, batch_cur)
+                if rec.alts is not None and len(rec.alts) == 1 and all_matched:
+                    if _aggregate_record(rec, brecs, n_haps, n_hap_total,
+                                         af_tag, info_tag, decimals):
+                        updated += 1
+                vcf_out.write(rec)
+                processed += 1
+                if processed % 50000 == 0:
+                    logger.info(f"Aggregated {processed} variants ...")
+    finally:
+        main_vcf.close()
+        for bv in batch_vcfs:
+            bv.close()
+    logger.info(f"Sequential aggregate finished: {processed} variants written, "
+                f"{updated} AF/INFO aggregated.")
+
+
+def _aggregate_parallel(records_from, batch_inputs, output_out, write_mode, num_workers,
+                        n_haps, af_tag, info_tag, decimals, tmp_dir):
+    """
+    Parallel `aggregate`: ensure indexes, split the records-from file into region
+    chunks (reusing the same splitter as `recompute`), aggregate each region in a
+    worker, then merge the temporaries in genomic order.
+    """
+    logger.info(f"Launching parallel aggregation with up to {num_workers} workers ...")
+
+    # Region fetch needs an index on the records-from file AND on every batch file.
+    if not _ensure_index(records_from):
+        logger.error("Cannot proceed: records-from index is missing.")
+        logging.shutdown()
+        sys.exit(1)
+    for bp in batch_inputs:
+        if not _ensure_index(bp):
+            logger.error(f"Cannot proceed: index missing for batch file '{bp}'.")
+            logging.shutdown()
+            sys.exit(1)
+
+    chunks = _build_region_chunks(records_from, num_workers)
+    actual_workers = len(chunks)
+    if actual_workers == 0:
+        logger.warning("No contigs with variant records found; writing empty output.")
+        with pysam.VariantFile(records_from) as vf:
+            header = vf.header
+        with pysam.VariantFile(output_out, write_mode, header=header):
+            pass
+        return
+
+    base_dir = tmp_dir if tmp_dir else os.path.dirname(os.path.abspath(output_out))
+    temp_dir = tempfile.mkdtemp(prefix="glimpse_agg_", dir=base_dir)
+    atexit.register(shutil.rmtree, temp_dir, ignore_errors=True)
+
+    if output_out.endswith('.bcf'):
+        temp_ext = '.bcf'
+    elif output_out.endswith('.vcf.gz'):
+        temp_ext = '.vcf.gz'
+    else:
+        temp_ext = '.vcf'
+
+    worker_args = []
+    for i, chunk in enumerate(chunks):
+        temp_path = os.path.join(temp_dir, f"chunk_{i:04d}{temp_ext}")
+        worker_args.append((records_from, batch_inputs, temp_path, chunk, write_mode,
+                            n_haps, af_tag, info_tag, decimals))
+
+    try:
+        with multiprocessing.Pool(processes=actual_workers) as pool:
+            results = pool.map(_aggregate_region_worker, worker_args)
+        total = sum(r for r in results if isinstance(r, int))
+        logger.info(f"All aggregate workers finished. Total variants processed: {total}")
+    except Exception:
+        logger.exception("Parallel aggregation aborted due to a worker failure.")
+        logging.shutdown()
+        sys.exit(1)
+
+    temp_files = [os.path.join(temp_dir, f"chunk_{i:04d}{temp_ext}") for i in range(len(chunks))]
+    temp_files = [f for f in temp_files if os.path.exists(f)]
+    _merge_temp_files(temp_files, output_out, write_mode)
+
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    logger.info("Parallel aggregation finished successfully.")
+
+
+def aggregate_info(records_from: str, batch_inputs, output_out: str, threads: int,
+                   af_tag: str, info_tag: str, decimals: int, tmp_dir: str) -> None:
+    """
+    Reconstruct cohort AF/INFO by combining the per-batch AF_b/INFO_b, then write
+    them onto the records/GP of the full-cohort `records_from` file. Dispatches to
+    the parallel path when threads > 1, otherwise streams sequentially.
+    """
+    write_mode = get_pysam_write_mode(output_out)
+    if not batch_inputs:
+        logger.error("aggregate requires at least one batch input file.")
+        logging.shutdown()
+        sys.exit(1)
+    for p in [records_from] + list(batch_inputs):
+        if not os.path.exists(p):
+            logger.error(f"Input file not found: {p}")
+            logging.shutdown()
+            sys.exit(1)
+
+    # Per-batch haplotype counts (2 * N_b), read once from each file's header.
+    n_haps = []
+    for bp in batch_inputs:
+        with pysam.VariantFile(bp) as bf:
+            n_haps.append(2 * len(bf.header.samples))
+    n_hap_total = sum(n_haps)
+
+    with pysam.VariantFile(records_from) as vf:
+        n_records_samples = len(vf.header.samples)
+
+    logger.info(f"Records-from : {records_from} ({n_records_samples} samples)")
+    logger.info(f"Batches      : {len(batch_inputs)} files, per-batch n_hap = {n_haps}")
+    logger.info(f"Cohort n_hap : {n_hap_total} (= 2 x {n_hap_total // 2} samples)")
+    logger.info(f"Output       : {output_out} (mode: '{write_mode}')")
+
+    # Sanity check: the merged records-from should hold exactly the union of batch
+    # samples. A mismatch usually means the batch file list is wrong.
+    if n_hap_total != 2 * n_records_samples:
+        logger.warning(
+            f"Sum of batch haplotypes ({n_hap_total}) != 2 x records-from samples "
+            f"({2 * n_records_samples}). Aggregation uses the batch total as the "
+            f"denominator; verify the batch list matches the merged cohort."
+        )
+
+    if threads > 1:
+        _aggregate_parallel(records_from, batch_inputs, output_out, write_mode, threads,
+                            n_haps, af_tag, info_tag, decimals, tmp_dir)
+    else:
+        _aggregate_sequential(records_from, batch_inputs, output_out, write_mode,
+                              n_haps, af_tag, info_tag, decimals)
+
+
+def _add_common_args(sp):
+    """Attach the options shared by both sub-commands to a sub-parser."""
+    sp.add_argument("-t", "--threads", type=int, default=1,
+                    help="Number of parallel worker processes. When > 1 the work is split "
+                         "by contig (or by position for single-chromosome / single-region "
+                         "input) and merged back in genomic order.")
+    sp.add_argument("--af-tag", type=str, default="AF",
+                    help="INFO tag name for the ALT allele frequency.")
+    sp.add_argument("--info-tag", type=str, default="INFO",
+                    help="INFO tag name for the IMPUTE info score.")
+    sp.add_argument("--decimals", type=int, default=3,
+                    help="Decimal places for the rounded INFO score (GLIMPSE uses 3).")
+    sp.add_argument("--tmp-dir", type=str, default=None,
+                    help="Directory for intermediate chunk files (default: output directory).")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Recompute cohort-wide GLIMPSE2 INFO/AF and INFO/INFO from full-cohort GP "
-                    "(fixes sample-batched imputation where these fields reflect only one batch).",
+        description="Recompute cohort-wide GLIMPSE2 INFO/AF and INFO/INFO for "
+                    "sample-batched imputation.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("-i", "--input", required=True, type=str,
-                        help="Input imputed variant file (.vcf, .vcf.gz, or .bcf) with FORMAT/GP.")
-    parser.add_argument("-o", "--output", required=True, type=str,
-                        help="Output file. Format inferred from extension (.vcf, .vcf.gz, .bcf).")
-    parser.add_argument("-t", "--threads", type=int, default=1,
-                        help="Number of parallel worker processes. When > 1, input is split by "
-                             "contig (or by position for single-chromosome input) and merged.")
-    parser.add_argument("--af-tag", type=str, default="AF",
-                        help="INFO tag name for the recomputed ALT allele frequency.")
-    parser.add_argument("--info-tag", type=str, default="INFO",
-                        help="INFO tag name for the recomputed IMPUTE info score.")
-    parser.add_argument("--decimals", type=int, default=3,
-                        help="Decimal places for the rounded INFO score (GLIMPSE uses 3).")
-    parser.add_argument("--tmp-dir", type=str, default=None,
-                        help="Directory for intermediate chunk files (default: output directory).")
+    sub = parser.add_subparsers(dest="command", required=True, help="Sub-command to run.")
+
+    # --- recompute: single-file GP method (approximate for rare variants) ---
+    p_rc = sub.add_parser(
+        "recompute", formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="Recompute AF/INFO from the full-cohort per-sample GP of ONE merged file. "
+             "Simple, but rare-variant INFO is approximate (GLIMPSE stores GP floored "
+             "to 3 decimals).")
+    p_rc.add_argument("-i", "--input", required=True, type=str,
+                      help="Input imputed file (.vcf/.vcf.gz/.bcf) with FORMAT/GP.")
+    p_rc.add_argument("-o", "--output", required=True, type=str,
+                      help="Output file; format inferred from extension.")
+    _add_common_args(p_rc)
+
+    # --- aggregate: per-batch method (accurate even for rare variants) ---
+    p_ag = sub.add_parser(
+        "aggregate", formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="Combine per-batch AF/INFO (computed by GLIMPSE at full precision) into "
+             "exact cohort AF/INFO. Accurate for rare variants. Run per chunk BEFORE "
+             "the per-batch files are deleted.")
+    p_ag.add_argument("--records-from", required=True, type=str,
+                      help="Full-cohort file (e.g. the per-chunk bcftools-merge output) "
+                           "whose records/GP/samples are kept; only its AF/INFO are "
+                           "overwritten.")
+    p_ag.add_argument("--batch-inputs", nargs="+", default=None, type=str,
+                      help="Per-batch imputed files (identical site sets), each carrying "
+                           "its own AF/INFO and samples.")
+    p_ag.add_argument("--batch-list", default=None, type=str,
+                      help="Alternative to --batch-inputs: a text file with one per-batch "
+                           "file path per line ('#' comments allowed).")
+    p_ag.add_argument("-o", "--output", required=True, type=str,
+                      help="Output file; format inferred from extension.")
+    _add_common_args(p_ag)
 
     args = parser.parse_args()
 
@@ -584,8 +991,19 @@ def main():
     if args.decimals < 0:
         parser.error("--decimals must be >= 0")
 
-    recompute_info(args.input, args.output, args.threads,
-                   args.af_tag, args.info_tag, args.decimals, args.tmp_dir)
+    if args.command == "recompute":
+        recompute_info(args.input, args.output, args.threads,
+                       args.af_tag, args.info_tag, args.decimals, args.tmp_dir)
+    elif args.command == "aggregate":
+        batch_inputs = list(args.batch_inputs) if args.batch_inputs else []
+        if args.batch_list:
+            with open(args.batch_list) as fh:
+                batch_inputs.extend(line.strip() for line in fh
+                                    if line.strip() and not line.startswith("#"))
+        if not batch_inputs:
+            parser.error("aggregate requires --batch-inputs or --batch-list")
+        aggregate_info(args.records_from, batch_inputs, args.output, args.threads,
+                       args.af_tag, args.info_tag, args.decimals, args.tmp_dir)
 
 
 if __name__ == "__main__":
