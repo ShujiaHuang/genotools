@@ -228,76 +228,129 @@ def _find_populated_contigs(vcf_path, candidate_contigs):
     return populated
 
 
+def _scan_contig_spans(vcf_path, contigs):
+    """
+    Single lightweight pass over the file to obtain, for each populated contig,
+    the actual [min_pos, max_pos, record_count]. Only CHROM/POS are touched; the
+    per-sample FORMAT fields are never decoded, so this pass is far cheaper than
+    the recompute pass itself.
+
+    This makes position-range splitting independent of whether the header declares
+    contig lengths (GLIMPSE phase output without --contigs-fai carries none), and
+    it bounds every range to where records actually are, so a single-region input
+    is split across workers without generating empty ranges.
+    """
+    target = set(contigs)
+    spans = {}  # contig -> [min_pos, max_pos, count]
+    with pysam.VariantFile(vcf_path) as vf:
+        for rec in vf:
+            c = rec.contig
+            if c not in target:
+                continue
+            p = rec.pos  # 1-based
+            s = spans.get(c)
+            if s is None:
+                spans[c] = [p, p, 1]
+            else:
+                if p < s[0]:
+                    s[0] = p
+                if p > s[1]:
+                    s[1] = p
+                s[2] += 1
+    return spans
+
+
+def _split_span(contig, lo, hi, n):
+    """
+    Split the 1-based inclusive interval [lo, hi] into n contiguous, non-overlapping
+    sub-ranges with no gaps. Returns a list of (contig, start, end) tuples. n is
+    clamped so a range is never finer than 1 bp.
+    """
+    span = hi - lo + 1
+    n = max(1, min(n, span))
+    if n == 1:
+        return [(contig, lo, hi)]
+    base = span // n
+    rem = span % n
+    ranges = []
+    start = lo
+    for j in range(n):
+        size = base + (1 if j < rem else 0)
+        end = start + size - 1
+        ranges.append((contig, start, end))
+        start = end + 1
+    return ranges
+
+
+def _allocate_workers(counts, num_workers):
+    """
+    Distribute num_workers slots across contigs proportionally to their record
+    counts, giving every populated contig at least one slot (largest-remainder
+    method). Called only when len(counts) < num_workers, so the allocation can
+    always sum up to num_workers.
+    """
+    k = len(counts)
+    alloc = [1] * k
+    remaining = num_workers - k
+    total = sum(counts)
+    if remaining <= 0 or total <= 0:
+        return alloc
+    quotas = [remaining * cnt / total for cnt in counts]
+    base = [int(q) for q in quotas]
+    for i in range(k):
+        alloc[i] += base[i]
+    leftover = remaining - sum(base)
+    order = sorted(range(k), key=lambda i: quotas[i] - base[i], reverse=True)
+    for i in range(leftover):
+        alloc[order[i]] += 1
+    return alloc
+
+
 def _build_region_chunks(vcf_path, num_workers):
     """
     Build parallel work chunks. Each chunk is a list of items that are EITHER:
       - a contig name (str)             -> process the entire contig
       - a (contig, start, end) tuple    -> process a 1-based inclusive range
 
-    Contig-level vs position-range splitting is decided from which contigs
-    *actually contain records*, so a single-chromosome input is automatically
-    split by position across all workers.
+    Splitting is driven purely by which contigs actually contain records and by
+    their real position spans (never by header contig lengths):
+      * >= num_workers populated contigs -> split at contig granularity.
+      * fewer contigs than workers (incl. single-chromosome / single-region) ->
+        scan the real (min, max, count) per contig and split each contig's span
+        by position, so every worker receives a non-empty slice.
     """
     with pysam.VariantFile(vcf_path) as vf:
         header_contigs = list(vf.header.contigs.keys())
-        contig_lengths = {}
-        for c in header_contigs:
-            try:
-                length = vf.header.contigs[c].length
-                contig_lengths[c] = length if length is not None else 0
-            except (AttributeError, ValueError):
-                contig_lengths[c] = 0
 
-    populated = set(_find_populated_contigs(vcf_path, header_contigs))
-    contigs = [c for c in header_contigs if c in populated]
+    # _find_populated_contigs preserves header order, which is the genomic sort
+    # order, so temp files merged in chunk order stay correctly sorted.
+    contigs = _find_populated_contigs(vcf_path, header_contigs)
 
     if not contigs:
         logger.warning("No contigs with variant records found; nothing to parallelise.")
         return []
 
-    # Enough populated contigs: split at contig granularity.
+    # Enough populated contigs: split at contig granularity (no scan needed).
     if len(contigs) >= num_workers:
         return _chunk_contigs(contigs, num_workers)
 
-    # Fewer contigs than workers: split active contigs by position proportionally.
-    inactive = [c for c in contigs if contig_lengths.get(c, 0) <= 0]
-    active = [(c, contig_lengths[c]) for c in contigs if contig_lengths[c] > 0]
+    # Fewer contigs than workers: derive real spans and split by position so that
+    # single-chromosome and single-region inputs still use every worker.
+    spans = _scan_contig_spans(vcf_path, contigs)
+    contigs = [c for c in contigs if c in spans and spans[c][2] > 0]
+    if not contigs:
+        logger.warning("No records found while scanning spans; nothing to parallelise.")
+        return []
 
-    if not active:
-        return _chunk_contigs(contigs, num_workers)
+    counts = [spans[c][2] for c in contigs]
+    alloc = _allocate_workers(counts, num_workers)
 
-    slots_for_active = max(1, num_workers - len(inactive))
-    total_length = sum(l for _, l in active)
-
-    split_map = {}
-    remaining_slots = slots_for_active
-    for idx, (contig, length) in enumerate(active):
-        remaining_active = len(active) - idx
-        if remaining_active == 1:
-            n = max(1, remaining_slots)
-        else:
-            fraction = length / max(1, total_length)
-            n = max(1, min(remaining_slots - (remaining_active - 1),
-                           int(fraction * slots_for_active + 0.5)))
-        split_map[contig] = n
-        remaining_slots -= n
-
-    # Build chunks in header contig order (preserves genomic sort order).
     chunks = []
-    for contig in contigs:
-        if contig in split_map:
-            length = contig_lengths[contig]
-            n_splits = min(split_map[contig], length)  # never split finer than 1 bp
-            if n_splits <= 1:
-                chunks.append([contig])
-            else:
-                split_len = max(1, length // n_splits)
-                for i in range(n_splits):
-                    start = i * split_len + 1
-                    end = (i + 1) * split_len if i < n_splits - 1 else length
-                    chunks.append([(contig, start, end)])
-        else:
-            chunks.append([contig])  # inactive contig (unknown length)
+    for contig, n_slots in zip(contigs, alloc):
+        lo, hi, cnt = spans[contig]
+        n_slots = min(n_slots, cnt)  # never create more ranges than records
+        for rng in _split_span(contig, lo, hi, n_slots):
+            chunks.append([rng])
 
     while len(chunks) > num_workers:
         chunks[-2].extend(chunks[-1])
