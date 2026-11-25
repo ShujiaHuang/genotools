@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 """
+这个程序实践证明不可用，因为 GLIMPSE2 进行 Imputation 过程中，Gibbs 抽样是依赖样本的：
+GLIMPSE2 是迭代式 phasing + imputation：phasing HMM 用 Gibbs 采样（SAMPLE_DIP，phasing_hmm.cpp:256），
+以 conditioning set 的单倍型（C->Hvar/C->n_states）为条件；imputation 再用 phased 单倍型去选参考条件集。
+样本集合变了 → phasing 变 → imputation 的 GP 变 → INFO 变。
+
+
 Recompute cohort-wide GLIMPSE2 INFO/AF and INFO/INFO on the FULL sample set.
 
 Why this is needed
@@ -682,8 +688,7 @@ def _consume_batch_records_at(pos, ref, alts, batch_iters, batch_cur):
         # or a main record that was boundary-skipped just before this one).
         while cur is not None and cur.pos < pos:
             cur = next(batch_iters[k], None)
-        if (cur is not None and cur.pos == pos
-                and cur.ref == ref and cur.alts == alts):
+        if (cur is not None and cur.pos == pos and cur.ref == ref and cur.alts == alts):
             brecs.append(cur)
             batch_cur[k] = next(batch_iters[k], None)  # consume the matched record
         else:
