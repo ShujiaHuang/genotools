@@ -166,11 +166,13 @@ def load_sites_table(sites_path: Path) -> List[Dict[str, Any]]:
 def load_target_samples(samples_arg: Optional[str], vcf_samples: List[str]) -> List[str]:
     if not samples_arg:
         return vcf_samples
+
     sample_path = Path(samples_arg)
     if sample_path.is_file():
-        requested = [line.strip().split() for line in sample_path.open("r", encoding="utf-8") if line.strip() and not line.startswith("#")]
+        requested = [line.strip().split()[0] for line in sample_path.open("r", encoding="utf-8") if line.strip() and not line.startswith("#")]
     else:
         requested = [s.strip() for s in samples_arg.split(",") if s.strip()]
+
     vcf_set = set(vcf_samples)
     valid = list(dict.fromkeys(s for s in requested if s in vcf_set))
     missing = len(set(requested)) - len(valid)
