@@ -184,7 +184,8 @@ def load_target_samples(samples_arg: Optional[str], vcf_samples: List[str]) -> L
 def get_csq_fields(hdr: pysam.VariantHeader) -> List[str]:
     if "CSQ" not in hdr.info or "Format:" not in hdr.info["CSQ"].description:
         return []
-    return hdr.info["CSQ"].description.split("Format:").strip().strip('"').split("|")
+
+    return hdr.info["CSQ"].description.split("Format:")[1].strip().strip('"').split("|")
 
 
 def parse_vep(rec: pysam.VariantRecord, alt_idx: int, fields: List[str], target_gene: Optional[str] = None) -> Dict[str, str]:
