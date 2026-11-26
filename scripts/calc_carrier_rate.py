@@ -18,7 +18,7 @@ Author: Shujia Huang & Gemini
 Date: 2026-11-25
 
 
-# 1. 区域模式（统计 PTEN 全基因 ClinVar P/LP + novel pLoF 变异）
+# 1. 区域模式(统计 PTEN 基因范围内 ClinVar P/LP + VEP 预测的高风险变异)
 python calc_carrier_rate.py \
     --vep-vcf cohort.sites.vep.vcf.gz \
     --gt-vcf cohort.gt.bcf \
@@ -30,7 +30,7 @@ python calc_carrier_rate.py \
     -o pten_summary.tsv \
     --carriers-out pten_carriers.tsv
 
-# 2. 多基因 BED 面板模式（例如一次性扫描整个 ACMG 基因列表 BED）
+# 2. 多基因 BED (比如输入整个 ACMG 基因列表 BED)
 python calc_carrier_rate.py \
     --vep-vcf cohort.sites.vep.vcf.gz \
     --gt-vcf cohort.gt.bcf \
@@ -46,7 +46,7 @@ python calc_carrier_rate.py \
     --sites-file target_hotspots.tsv \
     -o hotspots_summary.tsv
 
-# 4. 全注释模式（不指定 --vep-filter, 纳入区域内所有有 VEP 注释的变异）
+# 4. 全注释模式（纳入区域内所有有 VEP 注释的变异）
 python calc_carrier_rate.py \
     --vep-vcf cohort.sites.vep.vcf.gz \
     --gt-vcf cohort.gt.bcf \
@@ -60,8 +60,25 @@ python calc_carrier_rate.py \
     --vep-vcf cohort.sites.vep.vcf.gz \
     --gt-vcf cohort.gt.bcf \
     --bed acmg_genes.bed \
-    --vep-filter missense_variant,stop_gained,frameshift_variant,splice_donor_variant,splice_acceptor_variant \
+    --vep-filter missense_variant,stop_gained,frameshift_variant,splice_donor_variant,splice_acceptor_variant,start_lost,stop_lost \
     -o acmg_coding.tsv
+
+# 6. 提取全部 ClinVar 收录的变异（无论致病性）
+python calc_carrier_rate.py \
+    --vep-vcf cohort.sites.vep.vcf.gz \
+    --gt-vcf cohort.gt.bcf \
+    --bed acmg_genes.bed \
+    --vep-filter clinvar \
+    -o acmg_clinvar_all.tsv
+
+# 7. ClinVar 全部收录 + 新发 pLoF
+python calc_carrier_rate.py \
+    --vep-vcf cohort.sites.vep.vcf.gz \
+    --gt-vcf cohort.gt.bcf \
+    --bed acmg_genes.bed \
+    --vep-filter clinvar,HIGH \
+    --exclude-conflicting \
+    -o acmg_clinvar_plus_plof.tsv
     
 按照 VEP Consequence 注释信息提取 pLoF 变异，两个方式：
 (1) --vep-filter stop_gained,frameshift_variant,splice_donor_variant,splice_acceptor_variant (这些是gnomAD定义的 pLoF)
@@ -101,8 +118,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gene", type=str, default=None, help="Optional VEP SYMBOL filter (e.g. PTEN) for --region/--sites-file.")
     p.add_argument("--vep-filter", type=str, default=None,
                    help="Region/BED mode: comma-separated terms matched against VEP Consequence, IMPACT, "
-                        "and CLIN_SIG (case-insensitive). E.g. 'pathogenic,likely_pathogenic,HIGH' or "
-                        "'missense_variant,stop_gained,frameshift_variant'. When omitted, ALL annotated variants are included.")
+                        "and CLIN_SIG (case-insensitive). Reserved keyword 'clinvar' matches any variant "
+                        "with ClinVar annotation. E.g. 'clinvar', 'pathogenic,likely_pathogenic,HIGH', "
+                        "'missense_variant,stop_gained'. When omitted, ALL annotated variants are included.")
     p.add_argument("--exclude-conflicting", action="store_true", help="Region/BED mode: exclude variants with 'conflicting' in CLIN_SIG.")
     p.add_argument("--min-gq", type=int, default=0, help="Min GQ threshold (default: 0).")
     p.add_argument("--min-dp", type=int, default=0, help="Min DP threshold (default: 0).")
@@ -282,7 +300,9 @@ def classify_region_variant(
     """Return tier label if variant passes filters, else None.
 
     vep_filter: lowercase terms matched against VEP Consequence, IMPACT,
-    and CLIN_SIG fields.  When None, all annotated variants are included.
+    and CLIN_SIG fields.  The reserved keyword 'clinvar' matches any variant
+    with a ClinVar ID or CLIN_SIG annotation.  When None, all annotated
+    variants are included.
 
     Tier labels (based on variant properties, independent of filter):
       TIER1_CLINVAR          - has ClinVar ID or CLIN_SIG annotation
@@ -309,6 +329,7 @@ def classify_region_variant(
             bool(csq_terms & vep_filter)
             or impact in vep_filter
             or bool(set(terms_lower) & vep_filter)
+            or ("clinvar" in vep_filter and bool(extract_clinvar_id(ann) or terms))
         )
         if not matched:
             return None
