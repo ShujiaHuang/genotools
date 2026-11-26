@@ -80,11 +80,20 @@ python calc_carrier_rate.py \
     --exclude-conflicting \
     -o acmg_clinvar_plus_plof.tsv
     
-按照 VEP Consequence 注释信息提取 pLoF 变异，两个方式：
-(1) --vep-filter stop_gained,frameshift_variant,splice_donor_variant,splice_acceptor_variant (这些是gnomAD定义的 pLoF)
-(2) --vep-filter stop_gained,frameshift_variant,splice_donor_variant,splice_acceptor_variant,start_lost,stop_lost,transcript_ablation 
-    (这是我的定义，多包括了 tart_lost/stop_lost/transcript_ablation)
- 
+一些值得注意的地方：
+
+1. 按照 VEP Consequence 注释信息提取 pLoF 变异，两个方式：
+    (1) --vep-filter stop_gained,frameshift_variant,splice_donor_variant,splice_acceptor_variant (这些是gnomAD定义的 pLoF)
+    (2) --vep-filter stop_gained,frameshift_variant,splice_donor_variant,splice_acceptor_variant,start_lost,stop_lost,transcript_ablation 
+        (这是我的定义，多包括了 tart_lost/stop_lost/transcript_ablation)
+
+2. P/LP & VEP HIGH  
+
+VEP IMPACT=HIGH 指变异对蛋白的预测影响(截短、移码、剪接位点破坏), 由算法自行计算的。
+
+- ClinVar P/LP and HIGH      :  如致病性无义突变、移码缺失
+- ClinVar P/LP but not HIGH  :  如致病性错义突变(MODERATE)、致病性同义突变(LOW, 影响剪接)
+- HIGH but not ClinVar P/LP  :  如新发 pLoF(未收录)、良性截短(末外显子，不触发 NMD)
 
 """
 import argparse
@@ -453,7 +462,9 @@ def main() -> None:
                     if tier:
                         a2vep[akey] = ann
                         a2tgt[akey] = build_dynamic_target(akey, ann, tier, used_ids)
+        
         target_list = sorted(a2tgt.values(), key=lambda t: (clean_chr(t["chrom"]), t["pos"], t["ref"], t["alt"]))
+
     vep_vcf.close()
 
     gt_vcf = pysam.VariantFile(str(args.gt_vcf))
