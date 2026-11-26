@@ -5,10 +5,16 @@ paired sites-only VEP VCF/BCF and multi-sample genotype (GT) VCF/BCF files.
 
 Supported modes (mutually exclusive):
   1. --sites-file : Evaluate a user-supplied TSV/CSV list of target variants.
-  2. --region     : Scan one or more genomic regions (comma-separated) for ClinVar / pLoF sites.
+  2. --region     : Scan one or more genomic regions (comma-separated).
   3. --bed        : Scan regions from a BED file (4th column optionally specifies gene SYMBOL).
 
-Author: Shujia Huang and Gemini
+Variant filtering (--region / --bed mode):
+  --vep-filter    : Comma-separated terms matched against VEP Consequence,
+                    IMPACT, and CLIN_SIG (case-insensitive).  When omitted,
+                    ALL annotated variants are included.
+  --exclude-conflicting : Exclude variants with 'conflicting' in CLIN_SIG.
+
+Author: Shujia Huang & Gemini
 Date: 2026-11-25
 
 
@@ -18,9 +24,8 @@ python calc_carrier_rate.py \
     --gt-vcf cohort.gt.bcf \
     --region chr10:87863625-87971930 \
     --gene PTEN \
-    --clinvar-significance pathogenic,likely_pathogenic \
+    --vep-filter pathogenic,likely_pathogenic,HIGH \
     --exclude-conflicting \
-    --include-high-impact \
     -s subcohort_samples.txt \
     -o pten_summary.tsv \
     --carriers-out pten_carriers.tsv
@@ -30,7 +35,7 @@ python calc_carrier_rate.py \
     --vep-vcf cohort.sites.vep.vcf.gz \
     --gt-vcf cohort.gt.bcf \
     --bed acmg_genes.bed \
-    --clinvar-significance pathogenic,likely_pathogenic \
+    --vep-filter pathogenic,likely_pathogenic \
     --exclude-conflicting \
     -o acmg_panel_summary.tsv
 
@@ -41,27 +46,30 @@ python calc_carrier_rate.py \
     --sites-file target_hotspots.tsv \
     -o hotspots_summary.tsv
 
-# 4. 全注释模式 (统计区域内所有有 VEP 注释的变异，不限于 ClinVar)
+# 4. 全注释模式（不指定 --vep-filter, 纳入区域内所有有 VEP 注释的变异）
 python calc_carrier_rate.py \
     --vep-vcf cohort.sites.vep.vcf.gz \
     --gt-vcf cohort.gt.bcf \
     --region chr10:87863625-87971930 \
     --gene PTEN \
-    --all-annotated \
     -o pten_all_variants.tsv \
     --carriers-out pten_all_carriers.tsv
 
-# 5. 全纳入，但 ClinVar P/LP 仍单独标记
+# 5. 按 Consequence 筛选（只看错义 + 蛋白截短变异）
 python calc_carrier_rate.py \
-    --vep-vcf ... --gt-vcf ... \
+    --vep-vcf cohort.sites.vep.vcf.gz \
+    --gt-vcf cohort.gt.bcf \
     --bed acmg_genes.bed \
-    --all-annotated \
-    --clinvar-significance pathogenic,likely_pathogenic \
-    --exclude-conflicting \
-    -o acmg_full.tsv
+    --vep-filter missense_variant,stop_gained,frameshift_variant,splice_donor_variant,splice_acceptor_variant \
+    -o acmg_coding.tsv
+    
+按照 VEP Consequence 注释信息提取 pLoF 变异，两个方式：
+(1) --vep-filter stop_gained,frameshift_variant,splice_donor_variant,splice_acceptor_variant (这些是gnomAD定义的 pLoF)
+(2) --vep-filter stop_gained,frameshift_variant,splice_donor_variant,splice_acceptor_variant,start_lost,stop_lost,transcript_ablation 
+    (这是我的定义，多包括了 tart_lost/stop_lost/transcript_ablation)
+ 
 
 """
-
 import argparse
 import csv
 import re
@@ -91,10 +99,11 @@ def parse_args() -> argparse.Namespace:
     mode.add_argument("--bed", type=Path, help="BED file (0-based half-open; optional 4th column = gene SYMBOL).")
 
     p.add_argument("--gene", type=str, default=None, help="Optional VEP SYMBOL filter (e.g. PTEN) for --region/--sites-file.")
-    p.add_argument("--clinvar-significance", type=str, default=None, help="Region/BED mode: comma-separated CLIN_SIG terms (e.g. pathogenic,likely_pathogenic).")
-    p.add_argument("--exclude-conflicting", action="store_true", help="Region/BED mode: exclude ClinVar sites with 'conflicting' in CLIN_SIG.")
-    p.add_argument("--include-high-impact", action="store_true", help="Region/BED mode: also include non-benign VEP IMPACT=HIGH (novel pLoF) sites.")
-    p.add_argument("--all-annotated", action="store_true", help="Region/BED mode: include ALL variants with VEP annotation, not just ClinVar/HIGH impact. TIER1/TIER2 labels are still applied where applicable; remaining variants are labeled ALL_ANNOTATED.")
+    p.add_argument("--vep-filter", type=str, default=None,
+                   help="Region/BED mode: comma-separated terms matched against VEP Consequence, IMPACT, "
+                        "and CLIN_SIG (case-insensitive). E.g. 'pathogenic,likely_pathogenic,HIGH' or "
+                        "'missense_variant,stop_gained,frameshift_variant'. When omitted, ALL annotated variants are included.")
+    p.add_argument("--exclude-conflicting", action="store_true", help="Region/BED mode: exclude variants with 'conflicting' in CLIN_SIG.")
     p.add_argument("--min-gq", type=int, default=0, help="Min GQ threshold (default: 0).")
     p.add_argument("--min-dp", type=int, default=0, help="Min DP threshold (default: 0).")
     p.add_argument("--pass-only", action="store_true", help="Keep only FILTER=PASS records in GT VCF.")
@@ -127,23 +136,29 @@ def parse_region_token(token: str, default_gene: Optional[str]) -> RegionSpec:
 
 def load_regions(args: argparse.Namespace) -> List[RegionSpec]:
     if args.region:
-        return [parse_region_token(tok, args.gene) for tok in args.region.split(",") if tok.strip()]
+        return [parse_region_token(tok, args.gene) 
+                for tok in args.region.split(",") if tok.strip()]
+
     regions: List[RegionSpec] = []
     with args.bed.open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line or line.startswith(("#", "track", "browser")):
                 continue
+            
             parts = line.split("\t")
             if len(parts) < 3:
                 continue
+
             chrom = f"chr{clean_chr(parts)}"
             start_1based = int(parts) + 1
             end_1based = int(parts)
             gene = parts.strip() if len(parts) >= 4 and parts.strip() not in (".", "") else args.gene
             regions.append((chrom, start_1based, end_1based, gene))
+
     if not regions:
         sys.exit(f"[ERROR] No valid regions parsed from BED file: {args.bed}")
+    
     return regions
 
 
@@ -155,12 +170,13 @@ def load_sites_table(sites_path: Path) -> List[Dict[str, Any]]:
         reader = csv.DictReader(fh, delimiter=delim)
         if not reader.fieldnames or not {"chrom", "pos", "ref", "alt"}.issubset(set(reader.fieldnames)):
             sys.exit("[ERROR] --sites-file must contain header columns: chrom, pos, ref, alt")
+        
         for row in reader:
             chrom = f"chr{clean_chr(row['chrom'].strip())}"
             pos = int(row["pos"].strip())
             ref = row["ref"].strip().upper()
             alt = row["alt"].strip().upper()
-            raw_vid = (row.get("variant_id") or "").strip() or f"{clean_chr(chrom)}_{pos}_{ref}_{alt}"
+            raw_vid = (row.get("variant_id") or "").strip() or f"{clean_chr(chrom)}:{pos}:{ref}:{alt}"
             vid = raw_vid if raw_vid not in used_ids else f"{raw_vid}@{chrom}:{pos}{ref}>{alt}"
             used_ids.add(vid)
             targets.append({
@@ -176,10 +192,12 @@ def load_sites_table(sites_path: Path) -> List[Dict[str, Any]]:
                 "hgvsp": (row.get("hgvsp") or "").strip(),
                 "exon": (row.get("exon") or "NA").strip() or "NA",
                 "variant_tier": "USER_SITE",
-                "phenotype_group": (row.get("phenotype_group") or "User Target").strip() or "User Target",
+                "phenotype_group": (row.get("phenotype_group") or "User Target").strip() or "User Target"
             })
+    
     if not targets:
         sys.exit(f"[ERROR] No variants loaded from {sites_path}")
+    
     return targets
 
 
@@ -200,6 +218,7 @@ def load_target_samples(samples_arg: Optional[str], vcf_samples: List[str]) -> L
         print(f"[WARNING] {missing} requested sample(s) not found in --gt-vcf.", file=sys.stderr)
     if not valid:
         sys.exit("[ERROR] None of the specified samples exist in --gt-vcf.")
+    
     return valid
 
 
@@ -256,38 +275,51 @@ def clin_sig_terms(ann: Dict[str, str]) -> List[str]:
 
 
 def classify_region_variant(
-    ann: Dict[str, str], sig_filter: Optional[Set[str]], exclude_conflicting: bool, include_high_impact: bool,
-    include_all_annotated: bool = False,
+    ann: Dict[str, str],
+    vep_filter: Optional[Set[str]],
+    exclude_conflicting: bool,
 ) -> Optional[str]:
-    """Return tier label if variant passes, else None.
+    """Return tier label if variant passes filters, else None.
 
-    Tiers: TIER1_CLINVAR, TIER2_HIGH_IMPACT_PLOF, ALL_ANNOTATED.
-    When include_all_annotated is True, any variant with a non-empty VEP
-    annotation is included; TIER1/TIER2 labels take priority where applicable.
+    vep_filter: lowercase terms matched against VEP Consequence, IMPACT,
+    and CLIN_SIG fields.  When None, all annotated variants are included.
+
+    Tier labels (based on variant properties, independent of filter):
+      TIER1_CLINVAR          - has ClinVar ID or CLIN_SIG annotation
+      TIER2_HIGH_IMPACT_PLOF - VEP IMPACT=HIGH and not benign-only
+      ALL_ANNOTATED          - other annotated variants
     """
     if not ann:
         return None
-    
+
     terms = clin_sig_terms(ann)
     terms_lower = [t.lower() for t in terms]
     has_conflicting = any("conflicting" in t for t in terms_lower)
     is_benign_only = bool(terms_lower) and all(t in BENIGN_TERMS for t in terms_lower)
 
-    if not (exclude_conflicting and has_conflicting):
-        if sig_filter:
-            if any(t in sig_filter for t in terms_lower):
-                return "TIER1_CLINVAR"
-            
-        elif extract_clinvar_id(ann) or terms:
-            return "TIER1_CLINVAR"
+    # Hard exclusion: conflicting ClinVar interpretations
+    if exclude_conflicting and has_conflicting:
+        return None
 
-    if include_high_impact and ann.get("IMPACT", "").upper() == "HIGH" and not is_benign_only:
+    # Inclusion filter: match against Consequence, IMPACT, CLIN_SIG
+    if vep_filter:
+        csq_terms = {t.strip().lower() for t in re.split(r"[&;,]", ann.get("Consequence", "")) if t.strip()}
+        impact = (ann.get("IMPACT") or "").lower()
+        matched = (
+            bool(csq_terms & vep_filter)
+            or impact in vep_filter
+            or bool(set(terms_lower) & vep_filter)
+        )
+        if not matched:
+            return None
+
+    # Tier labeling (priority: TIER1 > TIER2 > ALL_ANNOTATED)
+    if extract_clinvar_id(ann) or terms:
+        return "TIER1_CLINVAR"
+    if ann.get("IMPACT", "").upper() == "HIGH" and not is_benign_only:
         return "TIER2_HIGH_IMPACT_PLOF"
-
-    if include_all_annotated:
-        return "ALL_ANNOTATED"
     
-    return None
+    return "ALL_ANNOTATED"
 
 
 def build_dynamic_target(akey: AlleleKey, ann: Dict[str, str], tier: str, used_ids: Set[str]) -> Dict[str, Any]:
@@ -300,15 +332,24 @@ def build_dynamic_target(akey: AlleleKey, ann: Dict[str, str], tier: str, used_i
     hgvsp = (ann.get("HGVSp", "").replace("%3D", "=").split(":")[-1]) or "NA"
     gene = ann.get("SYMBOL") or "NA"
 
-    base_vid = rsid if rsid else f"{chrom}_{pos}_{ref}_{alt}"
+    base_vid = rsid if rsid else f"{chrom}:{pos}:{ref}:{alt}"
     vid = base_vid if base_vid not in used_ids else f"{base_vid}@{chrom}:{pos}{ref}>{alt}"
     used_ids.add(vid)
 
     return {
-        "variant_id": vid, "gene": gene, "rsid": rsid or "NA", "clinvar_id": clinvar_id or "NA",
-        "chrom": f"chr{chrom}", "pos": pos, "ref": ref, "alt": alt,
-        "hgvsc": hgvsc, "hgvsp": hgvsp, "exon": (f"Exon {exon}" if exon != "NA" else "NA"),
-        "variant_tier": tier, "phenotype_group": f"CLIN_SIG:{sig}",
+        "variant_id": vid, 
+        "gene": gene, 
+        "rsid": rsid or "NA", 
+        "clinvar_id": clinvar_id or "NA",
+        "chrom": f"chr{chrom}", 
+        "pos": pos, 
+        "ref": ref, 
+        "alt": alt,
+        "hgvsc": hgvsc, 
+        "hgvsp": hgvsp, 
+        "exon": (f"Exon {exon}" if exon != "NA" else "NA"),
+        "variant_tier": tier, 
+        "phenotype_group": f"CLIN_SIG:{sig}",
     }
 
 
@@ -323,6 +364,7 @@ def match_user_site(akey: AlleleKey, vep: Dict[str, str], targets: List[Dict[str
             return t
         if (t["hgvsc"] and hgvsc == t["hgvsc"]) or (t["hgvsp"] and hgvsp == t["hgvsp"]):
             return t
+    
     return None
 
 
@@ -346,9 +388,9 @@ def fetch_region(vcf: pysam.VariantFile, chrom: str, start: int, end: int):
 
 def main() -> None:
     args = parse_args()
-    sig_filter = (
-        {t.strip().lower() for t in args.clinvar_significance.split(",") if t.strip()}
-        if args.clinvar_significance else None
+    vep_filter = (
+        {t.strip().lower() for t in args.vep_filter.split(",") if t.strip()}
+        if args.vep_filter else None
     )
 
     vep_vcf = pysam.VariantFile(str(args.vep_vcf))
@@ -385,8 +427,7 @@ def main() -> None:
                         continue
                     ann = parse_vep(rec, idx, csq_fields, target_gene=r_gene)
                     tier = classify_region_variant(
-                        ann, sig_filter, args.exclude_conflicting, args.include_high_impact,
-                        include_all_annotated=args.all_annotated,
+                        ann, vep_filter, args.exclude_conflicting,
                     )
                     if tier:
                         a2vep[akey] = ann
@@ -555,11 +596,9 @@ def main() -> None:
 
     print(f"[DONE] Total unique carriers: {len(uniq_carriers)}/{n_samples} ({len(uniq_carriers)/n_samples*100:.4f}%)")
     if not args.sites_file:
-        print(f" - Tier 1 (ClinVar) carriers: {len(tier1_carriers)}/{n_samples} ({len(tier1_carriers)/n_samples*100:.4f}%)")
-        if args.include_high_impact:
-            print(f" - Tier 2 (Novel pLoF) carriers: {len(tier2_carriers)}/{n_samples} ({len(tier2_carriers)/n_samples*100:.4f}%)")
-        if args.all_annotated:
-            print(f" - All annotated carriers: {len(all_annotated_carriers)}/{n_samples} ({len(all_annotated_carriers)/n_samples*100:.4f}%)")
+        print(f"       Tier 1 (ClinVar) carriers: {len(tier1_carriers)}/{n_samples} ({len(tier1_carriers)/n_samples*100:.4f}%)")
+        print(f"       Tier 2 (HIGH impact pLoF) carriers: {len(tier2_carriers)}/{n_samples} ({len(tier2_carriers)/n_samples*100:.4f}%)")
+        print(f"       Other annotated carriers: {len(all_annotated_carriers)}/{n_samples} ({len(all_annotated_carriers)/n_samples*100:.4f}%)")
 
 
 if __name__ == "__main__":
