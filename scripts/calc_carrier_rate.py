@@ -134,6 +134,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-gq", type=int, default=0, help="Min GQ threshold (default: 0).")
     p.add_argument("--min-dp", type=int, default=0, help="Min DP threshold (default: 0).")
     p.add_argument("--pass-only", action="store_true", help="Keep only FILTER=PASS records in GT VCF.")
+    
     return p.parse_args()
 
 
@@ -418,11 +419,9 @@ def fetch_region(vcf: pysam.VariantFile, chrom: str, start: int, end: int):
 
 def main() -> None:
     args = parse_args()
-    vep_filter = (
-        {t.strip().lower() for t in args.vep_filter.split(",") if t.strip()}
-        if args.vep_filter else None
-    )
-
+    # Parse VEP filter terms and ignore blank entries
+    vep_filter = {t.strip().lower() for t in args.vep_filter.split(",") if t.strip()} if args.vep_filter else None
+    
     vep_vcf = pysam.VariantFile(str(args.vep_vcf))
     csq_fields = get_csq_fields(vep_vcf.header)
     a2vep: Dict[AlleleKey, Dict[str, str]] = {}
@@ -437,6 +436,7 @@ def main() -> None:
             for rec in fetch_region(vep_vcf, fmt_chr(r_chr, vep_vcf.header), r_start, r_end):
                 if not rec.alts:
                     continue
+                
                 for idx, alt in enumerate(rec.alts, start=1):
                     akey = make_key(rec.chrom, rec.pos, rec.ref, alt)
                     ann = parse_vep(rec, idx, csq_fields, target_gene=r_gene)
@@ -451,14 +451,14 @@ def main() -> None:
             for rec in fetch_region(vep_vcf, fmt_chr(r_chr, vep_vcf.header), r_start, r_end):
                 if not rec.alts:
                     continue
+                
                 for idx, alt in enumerate(rec.alts, start=1):
                     akey = make_key(rec.chrom, rec.pos, rec.ref, alt)
                     if akey in a2tgt:
                         continue
+                    
                     ann = parse_vep(rec, idx, csq_fields, target_gene=r_gene)
-                    tier = classify_region_variant(
-                        ann, vep_filter, args.exclude_conflicting,
-                    )
+                    tier = classify_region_variant(ann, vep_filter, args.exclude_conflicting)
                     if tier:
                         a2vep[akey] = ann
                         a2tgt[akey] = build_dynamic_target(akey, ann, tier, used_ids)
@@ -471,8 +471,8 @@ def main() -> None:
     samples = load_target_samples(args.samples, list(gt_vcf.header.samples))
     if args.samples:
         gt_vcf.subset_samples(samples)
+        
     n_samples = len(samples)
-
     stats: Dict[str, Dict[str, Any]] = {
         t["variant_id"]: {
             "in_vep": False, "in_gt": False, "pos": f"{t['chrom']}:{t['pos']}",
@@ -500,7 +500,6 @@ def main() -> None:
                     st["af"] = ann[k]
                     break
 
-
     uniq_carriers: Set[str] = set()
     tier1_carriers: Set[str] = set()
     tier2_carriers: Set[str] = set()
@@ -514,13 +513,16 @@ def main() -> None:
                 continue
             if not rec.alts:
                 continue
+            
             for idx, alt in enumerate(rec.alts, start=1):
                 akey = make_key(rec.chrom, rec.pos, rec.ref, alt)
                 if akey in seen_records:
                     continue
+                
                 tgt = a2tgt.get(akey) or (match_user_site(akey, {}, target_list) if args.sites_file else None)
                 if not tgt or tgt["variant_id"] not in stats:
                     continue
+                
                 seen_records.add(akey)
                 vid = tgt["variant_id"]
                 st = stats[vid]
@@ -531,6 +533,7 @@ def main() -> None:
                     sd = rec.samples[s]
                     if not qc_pass(sd, args.min_gq, args.min_dp):
                         continue
+                    
                     gt = sd["GT"]
                     ploidy = len(gt)
                     copies = sum(1 for a in gt if a == idx)
@@ -555,12 +558,20 @@ def main() -> None:
                             zyg = "HET"
                             st["het"] += 1
                         carrier_rows.append({
-                            "sample_id": s, "gene": st["gene"], "variant_id": vid,
-                            "variant_tier": tgt["variant_tier"], "rsid": tgt["rsid"],
-                            "clinvar_id": tgt["clinvar_id"], "zygosity": zyg,
-                            "gt": "/".join(map(str, gt)), "gq": str(sd.get("GQ", "NA")),
-                            "dp": str(sd.get("DP", "NA")), "phenotype_group": tgt["phenotype_group"],
-                            "hgvsc": st["hgvsc"], "hgvsp": st["hgvsp"], "clin_sig": st["clin"],
+                            "sample_id": s, 
+                            "gene": st["gene"], 
+                            "variant_id": vid,
+                            "variant_tier": tgt["variant_tier"], 
+                            "rsid": tgt["rsid"],
+                            "clinvar_id": tgt["clinvar_id"], 
+                            "zygosity": zyg,
+                            "gt": "/".join(map(str, gt)), 
+                            "gq": str(sd.get("GQ", "NA")),
+                            "dp": str(sd.get("DP", "NA")), 
+                            "phenotype_group": tgt["phenotype_group"],
+                            "hgvsc": st["hgvsc"], 
+                            "hgvsp": st["hgvsp"], 
+                            "clin_sig": st["clin"]
                         })
     gt_vcf.close()
 
