@@ -34,12 +34,31 @@ python calc_carrier_rate.py \
     --exclude-conflicting \
     -o acmg_panel_summary.tsv
 
-# 3. 外部自定义位点表模式（传入包含 chrom,pos,ref,alt 的 TSV/CSV）
+# 3. 外部自定义位点表模式 (传入包含 chrom,pos,ref,alt 的 TSV/CSV)
 python calc_carrier_rate.py \
     --vep-vcf cohort.sites.vep.vcf.gz \
     --gt-vcf  cohort.gt.bcf \
     --sites-file target_hotspots.tsv \
     -o hotspots_summary.tsv
+
+# 4. 全注释模式 (统计区域内所有有 VEP 注释的变异，不限于 ClinVar)
+python calc_carrier_rate.py \
+    --vep-vcf cohort.sites.vep.vcf.gz \
+    --gt-vcf cohort.gt.bcf \
+    --region chr10:87863625-87971930 \
+    --gene PTEN \
+    --all-annotated \
+    -o pten_all_variants.tsv \
+    --carriers-out pten_all_carriers.tsv
+
+# 5. 全纳入，但 ClinVar P/LP 仍单独标记
+python calc_carrier_rate.py \
+    --vep-vcf ... --gt-vcf ... \
+    --bed acmg_genes.bed \
+    --all-annotated \
+    --clinvar-significance pathogenic,likely_pathogenic \
+    --exclude-conflicting \
+    -o acmg_full.tsv
 
 """
 
@@ -75,6 +94,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--clinvar-significance", type=str, default=None, help="Region/BED mode: comma-separated CLIN_SIG terms (e.g. pathogenic,likely_pathogenic).")
     p.add_argument("--exclude-conflicting", action="store_true", help="Region/BED mode: exclude ClinVar sites with 'conflicting' in CLIN_SIG.")
     p.add_argument("--include-high-impact", action="store_true", help="Region/BED mode: also include non-benign VEP IMPACT=HIGH (novel pLoF) sites.")
+    p.add_argument("--all-annotated", action="store_true", help="Region/BED mode: include ALL variants with VEP annotation, not just ClinVar/HIGH impact. TIER1/TIER2 labels are still applied where applicable; remaining variants are labeled ALL_ANNOTATED.")
     p.add_argument("--min-gq", type=int, default=0, help="Min GQ threshold (default: 0).")
     p.add_argument("--min-dp", type=int, default=0, help="Min DP threshold (default: 0).")
     p.add_argument("--pass-only", action="store_true", help="Keep only FILTER=PASS records in GT VCF.")
@@ -237,10 +257,17 @@ def clin_sig_terms(ann: Dict[str, str]) -> List[str]:
 
 def classify_region_variant(
     ann: Dict[str, str], sig_filter: Optional[Set[str]], exclude_conflicting: bool, include_high_impact: bool,
+    include_all_annotated: bool = False,
 ) -> Optional[str]:
-    """Return tier label ('TIER1_CLINVAR' or 'TIER2_HIGH_IMPACT_PLOF') if variant passes, else None."""
+    """Return tier label if variant passes, else None.
+
+    Tiers: TIER1_CLINVAR, TIER2_HIGH_IMPACT_PLOF, ALL_ANNOTATED.
+    When include_all_annotated is True, any variant with a non-empty VEP
+    annotation is included; TIER1/TIER2 labels take priority where applicable.
+    """
     if not ann:
         return None
+    
     terms = clin_sig_terms(ann)
     terms_lower = [t.lower() for t in terms]
     has_conflicting = any("conflicting" in t for t in terms_lower)
@@ -250,11 +277,16 @@ def classify_region_variant(
         if sig_filter:
             if any(t in sig_filter for t in terms_lower):
                 return "TIER1_CLINVAR"
+            
         elif extract_clinvar_id(ann) or terms:
             return "TIER1_CLINVAR"
 
     if include_high_impact and ann.get("IMPACT", "").upper() == "HIGH" and not is_benign_only:
         return "TIER2_HIGH_IMPACT_PLOF"
+
+    if include_all_annotated:
+        return "ALL_ANNOTATED"
+    
     return None
 
 
@@ -353,7 +385,8 @@ def main() -> None:
                         continue
                     ann = parse_vep(rec, idx, csq_fields, target_gene=r_gene)
                     tier = classify_region_variant(
-                        ann, sig_filter, args.exclude_conflicting, args.include_high_impact
+                        ann, sig_filter, args.exclude_conflicting, args.include_high_impact,
+                        include_all_annotated=args.all_annotated,
                     )
                     if tier:
                         a2vep[akey] = ann
@@ -398,6 +431,7 @@ def main() -> None:
     uniq_carriers: Set[str] = set()
     tier1_carriers: Set[str] = set()
     tier2_carriers: Set[str] = set()
+    all_annotated_carriers: Set[str] = set()
     seen_records: Set[Tuple[str, int, str, str]] = set()
     carrier_rows: List[Dict[str, str]] = []
 
@@ -436,6 +470,8 @@ def main() -> None:
                             tier1_carriers.add(s)
                         elif tgt["variant_tier"] == "TIER2_HIGH_IMPACT_PLOF":
                             tier2_carriers.add(s)
+                        elif tgt["variant_tier"] == "ALL_ANNOTATED":
+                            all_annotated_carriers.add(s)
                         if ploidy == 1:
                             zyg = "HEMI"
                             st["hemi"] += 1
@@ -475,19 +511,35 @@ def main() -> None:
             crate = tot_c / called if called else 0.0
             af = st["ac"] / st["an"] if st["an"] else 0.0
             w.writerow({
-                "gene": st["gene"], "variant_id": vid, "variant_tier": t["variant_tier"],
-                "rsid": t["rsid"], "clinvar_id": t["clinvar_id"], "exon": t["exon"],
-                "phenotype_group": t["phenotype_group"], "vcf_pos": st["pos"],
-                "vcf_alleles": st["alleles"], "found_in_vep": st["in_vep"],
-                "found_in_gt": st["in_gt"], "total_samples": n_samples,
-                "called_samples": called, "call_rate": f"{called / n_samples:.4f}",
-                "het_carriers": st["het"], "hom_alt_carriers": st["hom"],
-                "hemi_carriers": st["hemi"], "total_carriers": tot_c,
-                "carrier_rate": f"{crate:.6f}", "carrier_rate_pct": f"{crate * 100:.4f}%",
-                "alt_ac": st["ac"], "total_an": st["an"], "cohort_af": f"{af:.6f}",
-                "vep_hgvsc": st["hgvsc"], "vep_hgvsp": st["hgvsp"],
-                "vep_consequence": st["csq"], "vep_impact": st["imp"],
-                "vep_clin_sig": st["clin"], "vep_external_af": st["af"],
+                "gene": st["gene"], 
+                "variant_id": vid, 
+                "variant_tier": t["variant_tier"],
+                "rsid": t["rsid"], 
+                "clinvar_id": t["clinvar_id"], 
+                "exon": t["exon"],
+                "phenotype_group": t["phenotype_group"], 
+                "vcf_pos": st["pos"],
+                "vcf_alleles": st["alleles"], 
+                "found_in_vep": st["in_vep"],
+                "found_in_gt": st["in_gt"], 
+                "total_samples": n_samples,
+                "called_samples": called, 
+                "call_rate": f"{called / n_samples:.4f}",
+                "het_carriers": st["het"], 
+                "hom_alt_carriers": st["hom"],
+                "hemi_carriers": st["hemi"], 
+                "total_carriers": tot_c,
+                "carrier_rate": f"{crate:.6f}", 
+                "carrier_rate_pct": f"{crate * 100:.4f}%",
+                "alt_ac": st["ac"], 
+                "total_an": st["an"], 
+                "cohort_af": f"{af:.6f}",
+                "vep_hgvsc": st["hgvsc"], 
+                "vep_hgvsp": st["hgvsp"],
+                "vep_consequence": st["csq"], 
+                "vep_impact": st["imp"],
+                "vep_clin_sig": st["clin"], 
+                "vep_external_af": st["af"],
             })
 
     if args.carriers_out:
@@ -503,9 +555,11 @@ def main() -> None:
 
     print(f"[DONE] Total unique carriers: {len(uniq_carriers)}/{n_samples} ({len(uniq_carriers)/n_samples*100:.4f}%)")
     if not args.sites_file:
-        print(f"       Tier 1 (ClinVar) carriers: {len(tier1_carriers)}/{n_samples} ({len(tier1_carriers)/n_samples*100:.4f}%)")
+        print(f" - Tier 1 (ClinVar) carriers: {len(tier1_carriers)}/{n_samples} ({len(tier1_carriers)/n_samples*100:.4f}%)")
         if args.include_high_impact:
-            print(f"       Tier 2 (Novel pLoF) carriers: {len(tier2_carriers)}/{n_samples} ({len(tier2_carriers)/n_samples*100:.4f}%)")
+            print(f" - Tier 2 (Novel pLoF) carriers: {len(tier2_carriers)}/{n_samples} ({len(tier2_carriers)/n_samples*100:.4f}%)")
+        if args.all_annotated:
+            print(f" - All annotated carriers: {len(all_annotated_carriers)}/{n_samples} ({len(all_annotated_carriers)/n_samples*100:.4f}%)")
 
 
 if __name__ == "__main__":
