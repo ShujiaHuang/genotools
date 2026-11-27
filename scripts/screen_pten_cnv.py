@@ -194,6 +194,8 @@ def process_single_bam(
     (task_index, sample_id, normalized_counts, library_reads, library_source, status),
     where library_source is 'index' (autosomal mapped reads) or 'region' (usable
     reads in the scan window, used when the index has no counters, e.g. CRAM).
+    library_reads is always an int, 0 when neither source could determine it, so that
+    callers can store it in an integer array.
     """
     idx, sid, bam_path = task
     library_reads = 0
@@ -209,11 +211,16 @@ def process_single_bam(
             return (idx, sid, None, 0, library_source,
                     "NoIndex: missing .bai/.csi/.crai index (run samtools index)")
 
-        # 1. Library size from the index (fast, exact for BAM); None for CRAM
-        library_reads = index_library_depth(bam)
-        if library_reads is not None and library_reads < min_library_reads:
-            return (idx, sid, None, library_reads, library_source,
-                    f"LowLibrary: {library_reads} autosomal mapped reads < {min_library_reads}")
+        # 1. Library size from the index (fast, exact for BAM). CRAI indexes record no
+        #    per-contig counters, so this is None for CRAM: keep library_reads at 0 and
+        #    let the region-based fallback below supply it instead. Never assign None to
+        #    library_reads, or the early returns leak it to the caller.
+        indexed_depth = index_library_depth(bam)
+        if indexed_depth is not None:
+            library_reads = indexed_depth
+            if indexed_depth < min_library_reads:
+                return (idx, sid, None, library_reads, library_source,
+                        f"LowLibrary: {indexed_depth} autosomal mapped reads < {min_library_reads}")
 
         # 2. Fetch reads across the target chr10 region
         bam_chrom = resolve_chrom_name(chrom, bam.references)
@@ -235,7 +242,7 @@ def process_single_bam(
             return (idx, sid, None, library_reads, library_source,
                     "NoSignal: no usable read in the scan window")
 
-        if library_reads is None:
+        if indexed_depth is None:
             # CRAI indexes record no per-contig counters, so fall back to the usable
             # reads of the scan window. Both steps below (cohort bin median and
             # per-sample median re-centering) remove any per-sample scale factor,
