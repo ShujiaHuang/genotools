@@ -226,8 +226,7 @@ def process_single_bam(
                 or aln.is_duplicate
                 or aln.is_qcfail
                 or aln.mapping_quality < min_mapq
-            ):
-                continue
+            ): continue
             read_positions.append(aln.reference_start + 1)  # 1-based start
 
         if not read_positions:
