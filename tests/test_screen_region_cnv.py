@@ -580,17 +580,28 @@ def test_plot_dir_writes_overview_and_only_candidate_figures(cohort_dir, run_cli
     assert all(p.stat().st_size > 5_000 for p in pngs)
 
 
-def test_plot_samples_adds_the_requested_figures(cohort_dir, run_cli, tmp_path):
-    """--plot-samples follows up on the overview: named ids, or 'all' for the cohort."""
+def test_plot_samples_restricts_the_figures_to_the_named_ids(cohort_dir, run_cli, tmp_path):
+    """Naming samples replaces the default (candidates) instead of adding to it.
+
+    Regression: --plot-samples used to keep drawing every candidate as well, so on a
+    cohort with many calls one extra id looked like "it is plotting all samples".
+    """
     pytest.importorskip("matplotlib")
 
     wanted = make_pten_cnv_fixtures.NORMAL_SAMPLES[0]
-    one_dir, all_dir = tmp_path / "one", tmp_path / "all"
+    one_dir, both_dir, all_dir = tmp_path / "one", tmp_path / "both", tmp_path / "all"
     run_cli(tmp_path / "one", "--plot-dir", str(one_dir), "--plot-samples", wanted)
+    run_cli(tmp_path / "both", "--plot-dir", str(both_dir),
+            "--plot-samples", f"candidates,{wanted}")
     run_cli(tmp_path / "all", "--plot-dir", str(all_dir), "--plot-samples", "all")
 
-    assert wanted in {p.stem for p in one_dir.glob("*.png")}
-    assert "cohort_overview" in {p.stem for p in one_dir.glob("*.png")}
+    # only the named sample, no candidate figures
+    assert {p.stem for p in one_dir.glob("*.png")} == {"cohort_overview", wanted}
+    # the 'candidates' token is the documented way to keep them
+    assert {p.stem for p in both_dir.glob("*.png")} == {
+        "cohort_overview", wanted,
+        make_pten_cnv_fixtures.DEL_SAMPLE, make_pten_cnv_fixtures.DUP_SAMPLE,
+    }
     assert {p.stem for p in all_dir.glob("*.png")} == {"cohort_overview", *all_sample_ids()}
 
 

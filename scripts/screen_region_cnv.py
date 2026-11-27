@@ -16,7 +16,8 @@ Uses ONLY pysam for BAM/CRAM and FASTA operations, combined with:
   2) Per-sample GC-content stratification correction (when --ref-fasta is given)
   3) Cohort-wide bin median & robust MAD Z-score normalization
   4) Optional figures (--plot-dir, needs matplotlib): one cohort overview figure plus
-     per-sample profiles for the candidates (and anything named by --plot-samples)
+     per-sample profiles for the called candidates; --plot-samples narrows that to the
+     samples it names ('all' for every sample, 'candidates,<id>' to keep the candidates)
 
 Author: Shujia Huang and Gemini & Qoder
 Date: 2026-11-27
@@ -123,8 +124,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-library-reads", type=non_negative_int, default=10000, help="Minimum library size of a sample: mapped reads from the index, or usable reads in the scan window for CRAM (default: 10000).")
     p.add_argument("--min-valid-samples", type=positive_int, default=10, help="Minimum number of QC-passing samples required for cohort normalization (default: 10).")
     p.add_argument("--save-matrix", action="store_true", help="Save normalized copy-ratio matrix (.tsv.gz) for downstream segmentation.")
-    p.add_argument("--plot-dir", type=Path, default=None, help="Write a cohort overview figure plus one PNG per candidate sample (and any --plot-samples) into this directory (needs matplotlib; off by default).")
-    p.add_argument("--plot-samples", metavar="ID[,ID...]|all", default=None, help="Additional per-sample figures to write when --plot-dir is given: a comma-separated id list, or 'all' for every QC-passing sample (default: candidates only).")
+    p.add_argument("--plot-dir", type=Path, default=None, help="Write a cohort overview figure into this directory, plus a PNG for each called candidate (or only the samples named by --plot-samples); needs matplotlib, off by default.")
+    p.add_argument("--plot-samples", metavar="ID[,ID...]|all|candidates", default=None,
+                   help="Per-sample figures to write when --plot-dir is given: a comma-separated id list draws ONLY those samples, 'all' draws every QC-passing sample, and the token 'candidates' keeps the called samples in the list (default without this flag: candidates only).")
     return p.parse_args()
 
 
@@ -926,16 +928,34 @@ def main() -> None:
         plot_dir.mkdir(parents=True, exist_ok=True)
 
     # The overview figure answers "is anything wrong at all?"; per-sample figures are for
-    # following up on just the samples the overview singles out.
+    # following up on just the samples the overview singles out. Naming samples on the
+    # command line therefore REPLACES the default (candidates), it does not add to it:
+    # '--plot-samples N0123,N0456' used to keep drawing every candidate as well, which on
+    # a noisy cohort means hundreds of figures nobody asked for.
     plot_all = False
+    draw_candidates = True  # the policy when --plot-samples is absent
     plot_requested: set = set()
     if args.plot_samples:
-        if args.plot_samples.strip().lower() == "all":
-            plot_all = True
-        else:
-            plot_requested = {s.strip() for s in args.plot_samples.split(",") if s.strip()}
+        tokens = [token.strip() for token in args.plot_samples.split(",") if token.strip()]
+        flags = {token.lower() for token in tokens}
+        plot_all = "all" in flags
+        draw_candidates = "candidates" in flags
+        plot_requested = {token for token in tokens if token.lower() not in ("all", "candidates")}
+        if not tokens:
+            draw_candidates = False
         if plt_backend is None:
             print("[WARN] --plot-samples only applies together with --plot-dir.", file=sys.stderr)
+    if plt_backend is not None:
+        wanted = []
+        if plot_all:
+            wanted.append("every QC-passing sample")
+        else:
+            if plot_requested:
+                wanted.append("the requested sample(s): " + ", ".join(sorted(plot_requested)))
+            if draw_candidates:
+                wanted.append("the called candidates")
+        print(f"[INFO] Per-sample figures: {'; '.join(wanted) or 'none'}"
+              f" (plus the cohort overview).", file=sys.stderr)
 
     bin_starts, bin_ends, gc_array, target_indices = build_bins(
         chrom, target_start, target_end, scan_start, scan_end,
@@ -1126,7 +1146,9 @@ def main() -> None:
         ov_rows.append(v_ptr - 1)
 
         if plt_backend is not None and (
-            plot_all or sid in plot_requested or ctype not in ("NORMAL", "NO_SIGNAL")
+            plot_all
+            or sid in plot_requested
+            or (draw_candidates and ctype not in ("NORMAL", "NO_SIGNAL"))
         ):
             figure_name = unique_figure_name(safe_filename(sid), used_figure_names)
             try:
