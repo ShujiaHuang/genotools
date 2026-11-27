@@ -6,7 +6,8 @@ PTEN (10q23.31) locus across large-scale low-pass NIPT BAM/CRAM cohorts.
 Uses ONLY pysam for BAM/CRAM and FASTA operations, combined with:
   1) Library-size normalization (autosomal mapped reads from the index; CRAI
      indexes do not record per-contig counters, so CRAM input falls back to the
-     number of usable reads inside the target region)
+     number of usable reads inside the target region, reported as
+     library_norm_source=region)
   2) Per-sample GC-content stratification correction (when --ref-fasta is given)
   3) Cohort-wide bin median & robust MAD Z-score normalization
 
@@ -50,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-n-frac", type=float, default=0.20, help="Max allowed 'N' base fraction per bin (default: 0.20).")
     p.add_argument("--z-thresh", type=float, default=4.0, help="Absolute Z-score threshold for candidate CNV calling (default: 4.0).")
     p.add_argument("-t", "--threads", type=int, default=16, help="Number of parallel worker processes (default: 16).")
-    p.add_argument("--min-library-reads", type=int, default=10000, help="Minimum library size of a sample: autosomal mapped reads from the index, or region reads for CRAM (default: 10000).")
+    p.add_argument("--min-library-reads", type=int, default=10000, help="Minimum library size of a sample: autosomal mapped reads from the index, or usable reads in the scan window for CRAM (default: 10000).")
     p.add_argument("--min-valid-samples", type=int, default=10, help="Minimum number of QC-passing samples required for cohort normalization (default: 10).")
     p.add_argument("--save-matrix", action="store_true", help="Save normalized copy-ratio matrix (.tsv.gz) for downstream segmentation.")
     return p.parse_args()
@@ -158,19 +159,30 @@ def build_bins(
 
 def index_library_depth(bam: pysam.AlignmentFile) -> Optional[int]:
     """
-    Sum of mapped reads on autosomes as recorded by the BAM/CRAM index.
+    Autosomal mapped reads as recorded by the BAM/CRAM index.
 
     Returns None when the index carries no per-contig counters: CRAI indexes do not
     store them, so pysam reports 0 mapped reads for every contig of a CRAM file
     (see pysam.AlignmentFile.get_index_statistics). Callers must fall back to a
     region-based library size in that case.
+
+    When the header uses contig names that do not normalize to 1..22 (accession-style
+    names such as NC_000010.11), the autosomal sum is 0 even though reads exist; the
+    total over all contigs is returned instead so a BAM never silently degrades to a
+    window-based estimate.
     """
     try:
         stats = bam.get_index_statistics()
     except (ValueError, NotImplementedError):
         return None
 
-    total = sum(stat.mapped for stat in stats if clean_chrom(stat.contig) in AUTOSOMES_CLEAN)
+    autosomal = sum(stat.mapped for stat in stats if clean_chrom(stat.contig) in AUTOSOMES_CLEAN)
+    if autosomal > 0:
+        return autosomal
+
+    # Fallback for non-standard contig naming: the library scale only needs a constant
+    # factor per sample, so all-contig counts serve the same purpose.
+    total = sum(stat.mapped for stat in stats)
     return total if total > 0 else None
 
 
@@ -571,6 +583,14 @@ def main() -> None:
 
     n_no_signal = sum(1 for row in report_rows if row.get("cnv_call") == "NO_SIGNAL")
     print(f"[DONE] Valid samples evaluated: {n_valid}/{total_input}")
+    # Make the library-size source visible: a window-based estimate is expected for CRAM
+    # (.crai stores no read counters) and does not bias copy ratios, but it must never
+    # look like a silently zero-length library.
+    n_region = sum(1 for src in lib_source if src == "region")
+    if n_region:
+        print(f"[INFO] {n_region}/{total_input} sample(s) used a window-based library size "
+              f"(no per-contig counters in the index, e.g. CRAM/.crai). Per-sample scale "
+              f"cancels out in the cohort/sample median normalization.", file=sys.stderr)
     if n_no_signal:
         print(f"[WARN] {n_no_signal} sample(s) had no usable PTEN-bin signal (called NO_SIGNAL).", file=sys.stderr)
     if n_valid < total_input:
