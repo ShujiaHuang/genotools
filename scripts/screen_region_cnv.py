@@ -17,7 +17,8 @@ Uses ONLY pysam for BAM/CRAM and FASTA operations, combined with:
   3) Cohort-wide bin median & robust MAD Z-score normalization
   4) Optional noise gate (--max-flanking-mad): a contaminated library inflates the
      cohort's bin-wise spread and hides real events, so the samples whose flanking
-     MAD exceeds the threshold are excluded from the Z scale and flagged
+     MAD exceeds the threshold are excluded from the Z scale and from the cohort bin
+     baseline (the copy ratio is re-normalized once from the clean samples) and flagged
      noise_status=HIGH_MAD; their calls are kept, but they are listed in
      <out-prefix>.high_noise.tsv instead of the candidate table
   5) Optional figures (--plot-dir, needs matplotlib): one cohort overview figure plus
@@ -692,6 +693,66 @@ def plot_sample(
     plt.close(fig)
 
 
+def value_range(
+    values: np.ndarray,
+    mask: Optional[np.ndarray] = None,
+    pad_frac: float = 0.1,
+    pad_min: float = 0.05,
+    lo_bound: Optional[float] = None,
+) -> Optional[Tuple[float, float]]:
+    """Axis limits taken from the selected values plus a margin, or None if all are NaN.
+
+    Used to scale a figure to the clean bulk: one contaminated library can sit at copy
+    ratio 0.2 or 2.5 and would otherwise squash the whole cohort into a single line.
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    if mask is not None:
+        kept = np.asarray(mask, dtype=bool)
+        if kept.any():
+            arr = arr[kept]
+    finite = arr[np.isfinite(arr)]
+    if not finite.size:
+        return None
+    pad = max(pad_min, pad_frac * float(np.ptp(finite)))
+    lo, hi = float(finite.min()) - pad, float(finite.max()) + pad
+    if lo_bound is not None:
+        lo = max(lo, lo_bound)
+    return (lo, hi) if hi > lo else None
+
+
+def mark_offscale(
+    ax: Any,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    xlim: Optional[Tuple[float, float]] = None,
+    ylim: Optional[Tuple[float, float]] = None,
+    colour: str = "#b8860b",
+) -> int:
+    """Flag the points outside the axes at the edge they crossed.
+
+    An axis scaled to the clean samples must not make an off-scale outlier vanish without
+    a trace: each one gets an open triangle (or arrow) on the axis edge it fell past.
+    """
+    n_off = 0
+    for x, y in zip(np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)):
+        if not (np.isfinite(x) and np.isfinite(y)):
+            continue
+        y_off = ylim is not None and (y < ylim[0] or y > ylim[1])
+        x_off = xlim is not None and (x < xlim[0] or x > xlim[1])
+        if not (y_off or x_off):
+            continue
+        xc = x if not x_off else (xlim[1] if x > xlim[1] else xlim[0])
+        yc = y if not y_off else (ylim[1] if y > ylim[1] else ylim[0])
+        if y_off:
+            marker = "^" if y > ylim[1] else "v"
+        else:
+            marker = ">" if x > xlim[1] else "<"
+        ax.plot([xc], [yc], marker=marker, ms=5, mfc="none", mec=colour, mew=0.9,
+                ls="none", clip_on=False)
+        n_off += 1
+    return n_off
+
+
 def plot_cohort_overview(
     plt: Any,
     out_path: Path,
@@ -706,16 +767,29 @@ def plot_cohort_overview(
     target_start: int,
     target_end: int,
     title: str,
+    noise_status: Optional[List[str]] = None,
 ) -> None:
     """One figure for the whole cohort: which samples are worth a closer look, and why.
 
     Rows of the heatmap are sorted by target copy ratio, so a real event appears as a
     whole block of consistent colour while a noisy sample shows up as speckle. The ranked
     curve and the copy-ratio-vs-noise scatter then separate true calls from artefacts.
+    noise_status (one entry per sample, 'HIGH_MAD' for a sample flagged by
+    --max-flanking-mad) keeps those outliers from setting the axis scale: the ranges and
+    the scatter marks follow the clean samples, and an off-scale outlier is drawn as an
+    open triangle on the axis edge instead of squeezing everything else flat.
     """
     n = len(sids)
     target_cr = np.asarray(target_cr, dtype=np.float64)
     flank_mad = np.asarray(flank_mad, dtype=np.float64)
+    if noise_status is None or len(noise_status) != n:
+        clean_mask = np.ones(n, dtype=bool)
+    else:
+        clean_mask = np.array([s != "HIGH_MAD" for s in noise_status], dtype=bool)
+        if not clean_mask.any():  # nothing left to scale to: fall back to every sample
+            clean_mask = np.ones(n, dtype=bool)
+            
+    noisy_mask = ~clean_mask
     # NaN target copy ratios (NO_SIGNAL) sort to the top instead of breaking the order.
     order = np.argsort(np.where(np.isfinite(target_cr), target_cr, np.inf), kind="stable")
     cr_sorted = target_cr[order]
@@ -823,23 +897,48 @@ def plot_cohort_overview(
 
     ax_rank.set_xlabel("samples (sorted)")
     ax_rank.set_ylabel("target mean copy ratio")
+    # Scale to the clean samples: a contaminated library can sit at copy ratio 0.2 or 2.4,
+    # which would flatten every real call into a line. An off-scale point stays visible as
+    # an open triangle on the axis edge; its id and metrics are in the high_noise table.
+    cr_range = value_range(target_cr, clean_mask, pad_frac=0.1, pad_min=0.05)
+    if cr_range:
+        ax_rank.set_ylim(*cr_range)
+        n_off = mark_offscale(ax_rank, np.arange(1, n + 1), target_cr, None, cr_range)
+        if n_off:
+            rank_title += f"; {n_off} off-scale sample(s)"
     ax_rank.set_title(rank_title, fontsize=9, loc="left")
-    # leave room above/below the gates so the labels of the outliers stay visible
-    finite_cr = cr_sorted[np.isfinite(cr_sorted)]
-    if finite_cr.size:
-        pad = max(0.05, 0.1 * float(np.ptp(finite_cr)))
-        ax_rank.set_ylim(float(finite_cr.min()) - pad, float(finite_cr.max()) + pad)
 
     # 3) quality context: an outlier copy ratio inside a noisy sample is not a CNV
-    ax_qc.scatter(flank_mad, target_cr, s=12, c=colours, linewidths=0)
+    ax_qc.scatter(flank_mad[clean_mask], target_cr[clean_mask], s=12,
+                  c=np.array(colours, dtype=object)[clean_mask], linewidths=0)
+    if noisy_mask.any():
+        ax_qc.scatter(flank_mad[noisy_mask], target_cr[noisy_mask], s=26, marker="^",
+                      facecolors="none", edgecolors="#b8860b", linewidths=0.9)
     ax_qc.axhline(1.0, color="black", lw=0.8)
     for gate in (DEL_COPY_RATIO_MAX, DUP_COPY_RATIO_MIN):
         ax_qc.axhline(gate, color="#d62728", lw=0.7, ls="--")
 
     finite_mad = flank_mad[np.isfinite(flank_mad) & (flank_mad > 0)]
     # A log axis only helps when the cohort's noise really spans orders of magnitude.
-    if finite_mad.size and float(finite_mad.max()) > 20 * float(finite_mad.min()):
+    log_axis = bool(finite_mad.size and float(finite_mad.max()) > 20 * float(finite_mad.min()))
+    if log_axis:
         ax_qc.set_xscale("log")
+    if noisy_mask.any():  # same rule as the y axis: only the noise gate re-scales x
+        if log_axis:
+            clean_mad = flank_mad[clean_mask & np.isfinite(flank_mad) & (flank_mad > 0)]
+            if clean_mad.size:
+                ax_qc.set_xlim(float(clean_mad.min()) / 1.6, float(clean_mad.max()) * 1.6)
+        else:
+            # a positive quantity: never let the margin push the left edge below zero
+            clean_mad = flank_mad[clean_mask]
+            clean_mad = clean_mad[np.isfinite(clean_mad)]
+            mad_range = value_range(
+                flank_mad, clean_mask, pad_frac=0.15,
+                pad_min=0.15 * float(np.median(clean_mad)) if clean_mad.size else 0.05,
+                lo_bound=0.0,
+            )
+            if mad_range:
+                ax_qc.set_xlim(*mad_range)
 
     ax_qc.set_xlabel("flanking MAD of the copy ratio")
     ax_qc.set_ylabel("target mean copy ratio")
@@ -847,10 +946,14 @@ def plot_cohort_overview(
                     fontsize=9, loc="left")
     for label, colour in (("NORMAL", "#999999"), ("DEL", "#d62728"), ("DUP", "#1f77b4")):
         ax_qc.scatter([], [], s=14, c=colour, label=label)
+    if noisy_mask.any():
+        ax_qc.scatter([], [], s=20, marker="^", facecolors="none", edgecolors="#b8860b",
+                      label="HIGH_MAD (noise gate)")
 
     ax_qc.legend(loc="upper right", fontsize=6, frameon=False)
-    if finite_cr.size:
-        ax_qc.set_ylim(float(finite_cr.min()) - pad, float(finite_cr.max()) + pad)
+    if cr_range:
+        ax_qc.set_ylim(*cr_range)
+        mark_offscale(ax_qc, flank_mad, target_cr, ax_qc.get_xlim(), cr_range)
 
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out_path, dpi=150)
@@ -912,6 +1015,61 @@ def print_status_summary(statuses: List[str]) -> None:
         
     for code, (count, example) in sorted(groups.items(), key=lambda item: -item[1][0]):
         print(f"    {count:>8} sample(s): {example}", file=sys.stderr, flush=True)
+
+
+def normalize_copy_ratio(mat: np.ndarray, ref_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Copy ratio of every sample: cohort bin median, then per-sample median re-centering.
+
+    The cohort bin medians strip residual mappability/GC bias and the per-sample median
+    removes any remaining scale. ref_mask restricts the bin medians to those samples (the
+    ones that passed the noise gate), so a contaminated library cannot shift the reference
+    profile that every other sample is divided by.
+    """
+    ref = mat if ref_mask is None else mat[ref_mask, :]
+    bin_medians = np.median(ref, axis=0)
+    bin_medians[bin_medians <= 0] = np.nan
+    copy_ratio = mat / bin_medians
+    sample_medians = np.nanmedian(copy_ratio, axis=1, keepdims=True)
+    sample_medians = np.where(np.isfinite(sample_medians) & (sample_medians > 0), sample_medians, 1.0)
+    return copy_ratio / sample_medians
+
+
+def gated_copy_ratio(
+    mat: np.ndarray,
+    max_flanking_mad: float = 0.0,
+    min_samples: int = 1,
+    flank_mask: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Copy ratios plus the noise-gate mask, re-baselining once from the samples that pass.
+
+    The first pass measures the gate against the whole-cohort baseline; the second
+    re-estimates that baseline from the passing samples, because a contaminated minority
+    still drags the bin medians and so inflates the clean samples' flanking MAD -- the very
+    number this gate reads. On a synthetic cohort at 44% contamination that drops the clean
+    samples' flanking MAD from 0.032 to the unbiased 0.023, and moves a borderline event
+    (true copy ratio 0.78) from Z -4.5 to -6.8; a third pass changes the bin medians by
+    <0.1%, so two are enough. Returns (copy_ratio, gate_mask); the ratios are computed from
+    the whole cohort, only the reference profile is restricted to the clean samples.
+    """
+    copy_ratio = normalize_copy_ratio(mat)
+    gate = np.ones(mat.shape[0], dtype=bool)
+    if max_flanking_mad <= 0:
+        return copy_ratio, gate
+
+    for _ in range(2):
+        _, candidate = cohort_bin_mad(copy_ratio, max_flanking_mad, min_samples, flank_mask)
+        if int(candidate.sum()) < min_samples:
+            # Too few survivors to re-baseline from: keep the ratios and report the gate,
+            # so the caller can say the Z scale fell back to the whole cohort.
+            return copy_ratio, candidate
+        if np.array_equal(candidate, gate):
+            return copy_ratio, candidate
+        gate = candidate
+        copy_ratio = normalize_copy_ratio(mat, gate)
+
+    # One last gate on the final baseline, so the reported mask matches the reported ratios.
+    _, gate = cohort_bin_mad(copy_ratio, max_flanking_mad, min_samples, flank_mask)
+    return copy_ratio, gate
 
 
 def cohort_bin_mad(
@@ -1102,16 +1260,6 @@ def main() -> None:
 
     mat = raw_matrix[valid_indices, :]
 
-    # Cohort-wide bin median normalization (eliminates residual mappability & GC bias)
-    bin_medians = np.median(mat, axis=0)
-    bin_medians[bin_medians <= 0] = np.nan
-    copy_ratio = mat / bin_medians
-
-    # Re-center each sample by its own median copy ratio across the normalization window
-    sample_medians = np.nanmedian(copy_ratio, axis=1, keepdims=True)
-    sample_medians = np.where(np.isfinite(sample_medians) & (sample_medians > 0), sample_medians, 1.0)
-    copy_ratio = copy_ratio / sample_medians
-
     # Noise gate: the flanking MAD is measured outside the target bins, so a genuine
     # event in the target does not make its own carrier look noisy. 0 disables the gate.
     noise_threshold = float(args.max_flanking_mad)
@@ -1119,6 +1267,10 @@ def main() -> None:
     flank_mask[target_indices] = False
     if not flank_mask.any():  # a window that is nothing but target bins has no flanking bins
         flank_mask[:] = True
+
+    copy_ratio, gate_mask = gated_copy_ratio(
+        mat, noise_threshold, args.min_valid_samples, flank_mask
+    )
 
     bin_mad, gate_mask = cohort_bin_mad(
         copy_ratio, noise_threshold, args.min_valid_samples, flank_mask
@@ -1138,6 +1290,7 @@ def main() -> None:
                          f"--min-valid-samples ({args.min_valid_samples}), so the Z scale fell "
                          f"back to the whole cohort: lower --min-valid-samples to let the "
                          f"gate take effect.")
+
         print(f"[INFO] --max-flanking-mad {noise_threshold:g}: {gate_note}", file=sys.stderr)
 
     # Evaluate target-region metrics per valid sample
@@ -1153,6 +1306,7 @@ def main() -> None:
     ov_calls: List[str] = []
     ov_target_cr: List[float] = []
     ov_flank_mad: List[float] = []
+    ov_noise: List[str] = []
     ov_rows: List[int] = []
     plotted_ids: set = set()
     used_figure_names: set = set()
@@ -1235,6 +1389,7 @@ def main() -> None:
         ov_calls.append(ctype)
         ov_target_cr.append(target_cr)
         ov_flank_mad.append(flank_mad)
+        ov_noise.append(noise_status)
         ov_rows.append(v_ptr - 1)
 
         if plt_backend is not None and (
@@ -1272,6 +1427,7 @@ def main() -> None:
                 ov_sids, ov_calls, np.array(ov_target_cr), np.array(ov_flank_mad),
                 copy_ratio[np.array(ov_rows), :], bin_starts, bin_ends,
                 chrom, target_start, target_end, str(args.out_prefix.name),
+                noise_status=ov_noise,
             )
             print(f"[INFO] Wrote cohort overview {overview_path}", file=sys.stderr)
             written_figures.add(overview_path.name)

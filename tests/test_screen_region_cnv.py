@@ -653,6 +653,55 @@ def test_cohort_bin_mad_measures_the_gate_outside_the_target():
     assert not mask_everything[0]
 
 
+def test_gated_copy_ratio_rebaselines_from_the_clean_samples():
+    """A contaminated minority drags the cohort bin medians, which inflates the clean
+    samples' flanking MAD -- the very number the gate reads. The second pass has to take
+    the baseline from the samples that passed, or the gate partly measures its own bias."""
+    rng = np.random.default_rng(5)
+    profile = rng.uniform(800, 1200, 40)          # per-bin mappability
+    shared_bias = rng.normal(0.0, 0.30, 40)       # contamination hits the same bins
+
+    def draw(jitter, bias=None):
+        lam = profile * (1.0 + rng.normal(0.0, jitter, 40))
+        if bias is not None:
+            lam = lam * (1.0 + bias)
+        return rng.poisson(np.clip(lam, 1, None)).astype(float)
+
+    mat = np.vstack([np.vstack([draw(0.01) for _ in range(6)]),
+                     np.vstack([draw(0.05, shared_bias) for _ in range(4)])])
+    flank = np.ones(40, dtype=bool)
+    flank[10:14] = False
+
+    def flank_mad(cr):
+        return np.nanmedian(np.abs(cr[:, flank] - 1.0), axis=1)
+
+    baseline = flank_mad(screen_region_cnv.normalize_copy_ratio(mat))
+    cr, gate = screen_region_cnv.gated_copy_ratio(mat, 0.1, 2, flank)
+
+    assert gate[:6].all() and not gate[6:].any()   # only the contaminated rows are flagged
+    assert np.nanmedian(flank_mad(cr)[:6]) < np.nanmedian(baseline[:6])
+
+    # gate off: byte-identical to a plain normalization, so existing runs do not move
+    plain, all_rows = screen_region_cnv.gated_copy_ratio(mat, 0.0, 2, flank)
+    np.testing.assert_allclose(plain, screen_region_cnv.normalize_copy_ratio(mat))
+    assert all_rows.all()
+
+
+def test_value_range_ignores_offscale_outliers():
+    """The overview axes follow the clean samples; a contaminated library must not squash
+    the cohort into a flat line."""
+    values = np.array([1.0, 1.02, 0.98, 3.0])
+    clean = np.array([True, True, True, False])
+
+    lo, hi = screen_region_cnv.value_range(values, clean, pad_frac=0.1, pad_min=0.05)
+    assert lo == pytest.approx(0.93) and hi == pytest.approx(1.07)
+
+    # a positive quantity never gets a negative left edge, and all-NaN gives no range
+    lo, _ = screen_region_cnv.value_range(np.array([0.0, 0.01]), lo_bound=0.0, pad_min=0.05)
+    assert lo == 0.0
+    assert screen_region_cnv.value_range(np.array([np.nan, np.nan])) is None
+
+
 def test_flanking_mad_gate_flags_noisy_samples_without_erasing_calls(
     cohort_dir, run_cli, tmp_path, capsys
 ):
@@ -688,6 +737,29 @@ def test_flanking_mad_gate_flags_noisy_samples_without_erasing_calls(
         if row["noise_status"] == "OK" and row["cnv_call"] not in ("NORMAL", "NO_SIGNAL")
     }
     assert "exceeded --max-flanking-mad" in capsys.readouterr().err
+
+
+def test_noise_gate_keeps_high_mad_samples_out_of_the_figures(cohort_dir, run_cli, tmp_path):
+    """A flagged sample is not drawn as a candidate, and the overview is still written."""
+    pytest.importorskip("matplotlib")
+
+    prefix = tmp_path / "gate_figs"
+    plot_dir = tmp_path / "gate_figs_dir"
+    run_cli(prefix, "--max-flanking-mad", "0.015", "--min-valid-samples", "2",
+            "--plot-dir", str(plot_dir))
+
+    rows = read_tsv(Path(f"{prefix}.all_samples.tsv"))
+    noisy = {sid for sid, row in rows.items() if row["noise_status"] == "HIGH_MAD"}
+    assert noisy
+
+    pngs = {p.stem for p in plot_dir.glob("*.png")}
+    assert "cohort_overview" in pngs
+    assert not pngs & noisy
+    clean_candidates = {
+        sid for sid, row in rows.items()
+        if row["noise_status"] == "OK" and row["cnv_call"] in ("DEL", "DUP")
+    }
+    assert clean_candidates <= pngs
 
 
 def test_noise_gate_is_off_by_default(cohort_dir, run_cli, tmp_path):
