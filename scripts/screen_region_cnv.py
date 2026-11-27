@@ -201,6 +201,7 @@ def resolve_scan_window(
             # (chr16 is ~90.3 Mb) it would run past the chromosome end.
             scan_end = DEFAULT_SCAN_END if length is None else min(DEFAULT_SCAN_END, length)
             return DEFAULT_SCAN_START, scan_end, "default"
+
         scan_start = max(1, target_start - flank_bp)
         scan_end = target_end + flank_bp
         length = (contig_lengths or {}).get(chrom)
@@ -222,6 +223,7 @@ def resolve_scan_window(
         sys.exit(f"[ERROR] Target region {chrom}:{target_start}-{target_end} is not inside the "
                  f"scan window {chrom}:{scan_start}-{scan_end}. Widen --scan: the window only "
                  f"supplies the bins used for normalization.")
+        
     return scan_start, scan_end, source
 
 
@@ -497,7 +499,6 @@ def process_single_bam(
     
     finally:
         bam.close()
-
 
 
 def estimate_cnv_span(
@@ -837,13 +838,20 @@ def qc_failed_row(
 ) -> Dict[str, object]:
     """Per-sample report row for a sample that was not evaluated against the cohort."""
     return {
-        "sample_id": sid, "status": status,
-        "library_reads": library_reads, "library_norm_source": library_source,
-        "flanking_mad": "NA", "target_mean_copy_ratio": "NA",
-        "target_mean_zscore": "NA", "target_peak_zscore": "NA",
-        "target_abnormal_bins": "NA", "total_target_bins": n_target_bins,
-        "cnv_call": cnv_call, "est_cnv_start": "NA",
-        "est_cnv_end": "NA", "est_cnv_size_bp": "NA",
+        "sample_id": sid, 
+        "status": status,
+        "library_reads": library_reads, 
+        "library_norm_source": library_source,
+        "flanking_mad": "NA",
+        "target_mean_copy_ratio": "NA",
+        "target_mean_zscore": "NA",
+        "target_peak_zscore": "NA",
+        "target_abnormal_bins": "NA",
+        "total_target_bins": n_target_bins,
+        "cnv_call": cnv_call,
+        "est_cnv_start": "NA",
+        "est_cnv_end": "NA",
+        "est_cnv_size_bp": "NA"
     }
 
 
@@ -868,6 +876,7 @@ def print_status_summary(statuses: List[str]) -> None:
         code = status.split(":")[0]
         total, example = groups.get(code, [0, status])
         groups[code] = [total + count, example]
+        
     for code, (count, example) in sorted(groups.items(), key=lambda item: -item[1][0]):
         print(f"    {count:>8} sample(s): {example}", file=sys.stderr, flush=True)
 
@@ -893,6 +902,7 @@ def main() -> None:
             with pysam.AlignmentFile(probe_path, reference_filename=ref_fasta_str) as probe:
                 contig_lengths = dict(zip(probe.references, probe.lengths))
             break
+        
         except (OSError, ValueError):
             # An unreadable sample is reported by its worker; try the next one for the header.
             continue
@@ -904,6 +914,7 @@ def main() -> None:
     if scan_end - scan_start + 1 < args.bin_size:
         sys.exit(f"[ERROR] Scan window {chrom}:{scan_start}-{scan_end} is shorter than "
                  f"--bin-size {args.bin_size}: no bin can be built.")
+    
     print(f"[INFO] Target {chrom}:{target_start}-{target_end}; normalization window "
           f"{chrom}:{scan_start}-{scan_end} ({window_source}).", file=sys.stderr)
 
