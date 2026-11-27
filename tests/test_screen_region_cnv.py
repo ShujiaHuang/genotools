@@ -1,5 +1,5 @@
 """
-Tests for scripts/screen_pten_cnv.py.
+Tests for scripts/screen_region_cnv.py.
 
 Fixtures
 --------
@@ -7,7 +7,7 @@ Fixtures
 ``tests/make_pten_cnv_fixtures.py``): 10 normal samples plus one 50% deletion and
 one duplication, on short contigs so the whole run takes ~1 s.  The real PTEN
 coordinates would need an ~88 Mb FASTA, so the tests patch
-``PTEN_CORE_START``/``PTEN_CORE_END`` to the shrunk locus of the fixtures.
+``DEFAULT_TARGET_REGION`` to the shrunk locus of the fixtures.
 
 ``data/bam100`` is a symlink to another repo (100 real hg19 BAMs with a few hundred
 reads each, none on chr10); it is only used to check that real input without target
@@ -31,7 +31,7 @@ for _path in (str(_TESTS_DIR), _SCRIPTS_DIR):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-screen_pten_cnv = importlib.import_module("screen_pten_cnv")
+screen_region_cnv = importlib.import_module("screen_region_cnv")
 make_pten_cnv_fixtures = importlib.import_module("make_pten_cnv_fixtures")
 
 COHORT_DIR = _TESTS_DIR / "data" / "pten_cnv"
@@ -40,9 +40,9 @@ BAM100_DIR = _TESTS_DIR / "data" / "bam100"
 
 @pytest.fixture
 def shrunk_locus(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Move the PTEN core onto the synthetic locus, so short contigs can be used."""
-    monkeypatch.setattr(screen_pten_cnv, "PTEN_CORE_START", make_pten_cnv_fixtures.TEST_PTEN_START)
-    monkeypatch.setattr(screen_pten_cnv, "PTEN_CORE_END", make_pten_cnv_fixtures.TEST_PTEN_END)
+    """Move the default target onto the synthetic locus, so short contigs can be used."""
+    monkeypatch.setattr(screen_region_cnv, "DEFAULT_TARGET_REGION",
+                        f"chr10:{make_pten_cnv_fixtures.TEST_PTEN_START}-{make_pten_cnv_fixtures.TEST_PTEN_END}")
 
 
 @pytest.fixture(scope="session")
@@ -55,24 +55,24 @@ def cohort_dir() -> Path:
 
 @pytest.fixture
 def run_cli(cohort_dir: Path, shrunk_locus, monkeypatch: pytest.MonkeyPatch):
-    """Run screen_pten_cnv.main() against the fixtures with the shrunk PTEN locus."""
+    """Run screen_region_cnv.main() against the fixtures with the shrunk target locus."""
     monkeypatch.chdir(cohort_dir)
 
-    def _run(out_prefix: Path, *extra: str, bam_list: str = "bam_list.txt"):
+    def _run(out_prefix: Path, *extra: str, bam_list: str = "bam_list.txt", scan: bool = True):
         argv = [
-            "screen_pten_cnv.py",
+            "screen_region_cnv.py",
             "--bam-list", bam_list,
             "-o", str(out_prefix),
             "--ref-fasta", "ref.fa",
-            "--scan-start", str(make_pten_cnv_fixtures.SCAN_START),
-            "--scan-end", str(make_pten_cnv_fixtures.SCAN_END),
+            *(["--scan", f"chr10:{make_pten_cnv_fixtures.SCAN_START}-{make_pten_cnv_fixtures.SCAN_END}"]
+              if scan else []),
             "--bin-size", str(make_pten_cnv_fixtures.BIN_SIZE),
             "--step-size", str(make_pten_cnv_fixtures.STEP_SIZE),
             "-t", "4",
             *extra,
         ]
         monkeypatch.setattr(sys, "argv", argv)
-        screen_pten_cnv.main()
+        screen_region_cnv.main()
 
     return _run
 
@@ -125,12 +125,12 @@ def test_bam_cohort_calls_known_cnv_and_reports_no_false_positive(cohort_dir, ru
 
     for sid in make_pten_cnv_fixtures.NORMAL_SAMPLES:
         assert rows[sid]["cnv_call"] == "NORMAL", rows[sid]
-        assert abs(float(rows[sid]["pten_mean_copy_ratio"]) - 1.0) < 0.1
+        assert abs(float(rows[sid]["target_mean_copy_ratio"]) - 1.0) < 0.1
 
     assert rows[make_pten_cnv_fixtures.DEL_SAMPLE]["cnv_call"] == "DEL"
-    assert float(rows[make_pten_cnv_fixtures.DEL_SAMPLE]["pten_mean_copy_ratio"]) < 0.8
+    assert float(rows[make_pten_cnv_fixtures.DEL_SAMPLE]["target_mean_copy_ratio"]) < 0.8
     assert rows[make_pten_cnv_fixtures.DUP_SAMPLE]["cnv_call"] == "DUP"
-    assert float(rows[make_pten_cnv_fixtures.DUP_SAMPLE]["pten_mean_copy_ratio"]) > 1.2
+    assert float(rows[make_pten_cnv_fixtures.DUP_SAMPLE]["target_mean_copy_ratio"]) > 1.2
 
     # the estimated span must cover the simulated 20 kb event
     for sid in (make_pten_cnv_fixtures.DEL_SAMPLE, make_pten_cnv_fixtures.DUP_SAMPLE):
@@ -183,7 +183,7 @@ def test_cram_and_bam_agree_on_copy_ratio(cohort_dir, run_cli, tmp_path):
     bam_rows = read_tsv(Path(f"{bam_prefix}.all_samples.tsv"))
     cram_rows = read_tsv(Path(f"{cram_prefix}.all_samples.tsv"))
     assert bam_rows[sid]["cnv_call"] == cram_rows[sid]["cnv_call"] == "DEL"
-    assert abs(float(bam_rows[sid]["pten_mean_copy_ratio"]) - float(cram_rows[sid]["pten_mean_copy_ratio"])) < 0.05
+    assert abs(float(bam_rows[sid]["target_mean_copy_ratio"]) - float(cram_rows[sid]["target_mean_copy_ratio"])) < 0.05
 
 
 def test_full_cohort_bam_and_cram_agree(cohort_dir, run_cli, tmp_path):
@@ -212,8 +212,8 @@ def test_full_cohort_bam_and_cram_agree(cohort_dir, run_cli, tmp_path):
     for sid in sample_ids:
         assert bam_rows[sid]["status"] == cram_rows[sid]["status"] == "OK", (sid, bam_rows[sid], cram_rows[sid])
         assert bam_rows[sid]["cnv_call"] == cram_rows[sid]["cnv_call"], (sid, bam_rows[sid], cram_rows[sid])
-        delta = abs(float(bam_rows[sid]["pten_mean_copy_ratio"])
-                    - float(cram_rows[sid]["pten_mean_copy_ratio"]))
+        delta = abs(float(bam_rows[sid]["target_mean_copy_ratio"])
+                    - float(cram_rows[sid]["target_mean_copy_ratio"]))
         assert delta < 0.05, (sid, delta, bam_rows[sid], cram_rows[sid])
 
     # the simulated events are still called, i.e. agreement is not vacuous
@@ -241,7 +241,7 @@ def test_identical_samples_do_not_crash_on_zero_mad(cohort_dir, run_cli, tmp_pat
 
     assert {row["status"] for row in rows.values()} == {"OK"}
     assert {row["cnv_call"] for row in rows.values()} == {"NORMAL"}
-    assert all(float(row["pten_mean_zscore"]) == 0.0 for row in rows.values())
+    assert all(float(row["target_mean_zscore"]) == 0.0 for row in rows.values())
 
 
 def test_too_few_valid_samples_writes_diagnostic_report(run_cli, tmp_path, capsys):
@@ -272,8 +272,9 @@ def test_small_cohort_marks_samples_not_evaluated(run_cli, tmp_path):
 
 
 def test_worker_statuses_for_broken_inputs(cohort_dir, shrunk_locus, tmp_path):
-    bin_starts, bin_ends, gc_array, _ = screen_pten_cnv.build_bins(
-        "chr10", make_pten_cnv_fixtures.SCAN_START, make_pten_cnv_fixtures.SCAN_END,
+    bin_starts, bin_ends, gc_array, _ = screen_region_cnv.build_bins(
+        "chr10", make_pten_cnv_fixtures.TEST_PTEN_START, make_pten_cnv_fixtures.TEST_PTEN_END,
+        make_pten_cnv_fixtures.SCAN_START, make_pten_cnv_fixtures.SCAN_END,
         make_pten_cnv_fixtures.BIN_SIZE, make_pten_cnv_fixtures.STEP_SIZE,
         cohort_dir / "ref.fa", 0.2,
     )
@@ -282,11 +283,12 @@ def test_worker_statuses_for_broken_inputs(cohort_dir, shrunk_locus, tmp_path):
     args = ("chr10", make_pten_cnv_fixtures.SCAN_START, make_pten_cnv_fixtures.SCAN_END,
             bin_starts, bin_ends, stratum_ids, str(cohort_dir / "ref.fa"), 30, 1_000)
 
-    # missing index
+    # missing index: nothing could be measured, so no library source may be claimed
     no_index = tmp_path / "noindex.bam"
     no_index.write_bytes((cohort_dir / "N01.bam").read_bytes())
-    _, _, counts, _, _, status = screen_pten_cnv.process_single_bam((0, "x", str(no_index)), *args)
+    _, _, counts, reads, source, status = screen_region_cnv.process_single_bam((0, "x", str(no_index)), *args)
     assert counts is None and status.startswith("NoIndex")
+    assert (reads, source) == (0, "NA")
 
     # valid BAM whose chr10 carries no usable read
     with pysam.AlignmentFile(str(cohort_dir / "N01.bam"), "rb") as src:
@@ -296,8 +298,83 @@ def test_worker_statuses_for_broken_inputs(cohort_dir, shrunk_locus, tmp_path):
             for rec in src.fetch("chr1"):
                 dst.write(rec)
     pysam.index(str(empty))
-    _, _, counts, _, _, status = screen_pten_cnv.process_single_bam((0, "x", str(empty)), *args)
+    _, _, counts, _, _, status = screen_region_cnv.process_single_bam((0, "x", str(empty)), *args)
     assert counts is None and status.startswith("NoSignal")
+
+
+def test_invalid_numeric_options_are_rejected_up_front(monkeypatch):
+    """Zero bin/step sizes and thread counts used to surface as a raw ValueError traceback."""
+    for flag, value in (("--bin-size", "0"), ("--step-size", "0"), ("-t", "0"),
+                        ("--z-thresh", "0"), ("--max-n-frac", "1.5")):
+        monkeypatch.setattr(sys, "argv", ["screen_region_cnv.py", "--bam-list", "x", "-o", "y",
+                                           flag, value])
+        with pytest.raises(SystemExit) as excinfo:
+            screen_region_cnv.parse_args()
+        assert excinfo.value.code == 2, (flag, value)
+
+
+def test_default_window_is_clamped_to_a_short_contig():
+    """The historical 80-96 Mb window must not run past a contig shorter than 96 Mb."""
+    window = screen_region_cnv.resolve_scan_window(
+        "chr16", 87_000_000, 87_100_000, None, {"chr16": 90_338_345})
+    assert window == (80_000_000, 90_338_345, "default")
+
+    # a long contig still gets the untouched historical window (PTEN behaviour unchanged)
+    assert screen_region_cnv.resolve_scan_window(
+        "chr10", 87_863_625, 87_971_930, None, {"chr10": 248_956_422}) == (80_000_000, 96_000_000, "default")
+
+
+def test_alignment_and_fasta_build_mismatch_fails_cleanly(cohort_dir, shrunk_locus):
+    """A GRCh37 BAM with a GRCh38 FASTA shares the contig name but not the coordinates."""
+    with pytest.raises(SystemExit) as excinfo:
+        screen_region_cnv.build_bins(
+            "chr10", make_pten_cnv_fixtures.TEST_PTEN_START, make_pten_cnv_fixtures.TEST_PTEN_END,
+            make_pten_cnv_fixtures.SCAN_START, make_pten_cnv_fixtures.SCAN_END,
+            make_pten_cnv_fixtures.BIN_SIZE, make_pten_cnv_fixtures.STEP_SIZE,
+            cohort_dir / "ref.fa", 0.2, {"chr10": 135_534_747},
+        )
+    assert "different builds" in str(excinfo.value.code)
+
+
+def test_figure_file_names_never_collide():
+    """safe_filename() maps 'A/B' and 'A_B' to one name; the writer must not overwrite."""
+    used: set = set()
+    first = screen_region_cnv.unique_figure_name(screen_region_cnv.safe_filename("A/B"), used)
+    second = screen_region_cnv.unique_figure_name(screen_region_cnv.safe_filename("A_B"), used)
+    assert first != second
+    assert first == "A_B.png"
+    # the reserved overview name must never be handed to a sample
+    assert screen_region_cnv.unique_figure_name("cohort_overview", set()) == "cohort_overview_2.png"
+
+
+def test_duplicate_sample_ids_are_renamed_to_something_unique(tmp_path):
+    """Regression: the '<id>_<count>' fallback could itself already be taken.
+
+    A list holding 'A_2', 'A', 'A' used to yield 'A_2' twice, so the two samples merged
+    into one row in every report and one row of the copy-ratio matrix.
+    """
+    bam_list = write_bam_list(tmp_path / "dup.txt", [
+        ("A_2", "p1.bam"), ("A", "p2.bam"), ("A", "p3.bam"), ("A", "p4.bam"),
+    ])
+    samples = screen_region_cnv.load_sample_bams(bam_list)
+    ids = [sid for sid, _ in samples]
+    assert len(set(ids)) == len(ids) == 4
+    # the first occurrences keep their ids, only the duplicates are renamed
+    assert ids[:2] == ["A_2", "A"]
+    assert [path for _, path in samples] == ["p1.bam", "p2.bam", "p3.bam", "p4.bam"]
+
+
+def test_chrom_mismatch_fails_once_up_front(cohort_dir, run_cli, tmp_path):
+    """The chromosome of --target must exist in the alignment header, with its exact naming.
+
+    A mismatch has to fail once, before the worker pool, instead of surfacing per sample
+    as ReadError.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        run_cli(tmp_path / "no_chrom", "--target", "chr99:1-1000")
+    err = str(excinfo.value)
+    assert "not in the alignment header" in err
+    assert "--target" in err
 
 
 def test_cram_without_region_reads_keeps_the_run_alive(cohort_dir, run_cli, tmp_path):
@@ -336,14 +413,15 @@ def test_cram_without_region_reads_keeps_the_run_alive(cohort_dir, run_cli, tmp_
 def test_real_bams_without_target_coverage_are_rejected(cohort_dir, shrunk_locus):
     """Real hg19 BAMs from bam100: valid header and index, but no chr10 reads and a
     library far below the threshold, so they must be rejected, never called."""
-    bin_starts, bin_ends, gc_array, _ = screen_pten_cnv.build_bins(
-        "chr10", make_pten_cnv_fixtures.SCAN_START, make_pten_cnv_fixtures.SCAN_END,
+    bin_starts, bin_ends, gc_array, _ = screen_region_cnv.build_bins(
+        "chr10", make_pten_cnv_fixtures.TEST_PTEN_START, make_pten_cnv_fixtures.TEST_PTEN_END,
+        make_pten_cnv_fixtures.SCAN_START, make_pten_cnv_fixtures.SCAN_END,
         make_pten_cnv_fixtures.BIN_SIZE, make_pten_cnv_fixtures.STEP_SIZE,
         cohort_dir / "ref.fa", 0.2,
     )
     ref = str(cohort_dir / "ref.fa")
     for bam_path in sorted(BAM100_DIR.glob("*.bam"))[:3]:
-        _, _, counts, reads, _, status = screen_pten_cnv.process_single_bam(
+        _, _, counts, reads, _, status = screen_region_cnv.process_single_bam(
             (0, "x", str(bam_path)), "chr10", make_pten_cnv_fixtures.SCAN_START,
             make_pten_cnv_fixtures.SCAN_END, bin_starts, bin_ends,
             (gc_array * 50).astype("int32"), ref, 30, 10000,
@@ -360,7 +438,7 @@ def test_reference_without_target_contig_fails_cleanly(shrunk_locus, tmp_path):
     pysam.faidx(str(other))
 
     with pytest.raises(SystemExit) as excinfo:
-        screen_pten_cnv.build_bins("chr10", 1_000, 20_000, 5_000, 5_000, other, 0.2)
+        screen_region_cnv.build_bins("chr10", 1_000, 2_000, 1_000, 20_000, 5_000, 5_000, other, 0.2)
     assert "not found in --ref-fasta" in str(excinfo.value.code)
 
 
@@ -372,11 +450,168 @@ def test_bgzipped_reference_gives_the_same_bins(cohort_dir, shrunk_locus, tmp_pa
     pysam.tabix_compress(str(cohort_dir / "ref.fa"), str(ref_gz), force=True)
     pysam.faidx(str(ref_gz))
 
-    locus = ("chr10", make_pten_cnv_fixtures.SCAN_START, make_pten_cnv_fixtures.SCAN_END,
+    locus = ("chr10", make_pten_cnv_fixtures.TEST_PTEN_START, make_pten_cnv_fixtures.TEST_PTEN_END,
+             make_pten_cnv_fixtures.SCAN_START, make_pten_cnv_fixtures.SCAN_END,
              make_pten_cnv_fixtures.BIN_SIZE, make_pten_cnv_fixtures.STEP_SIZE)
-    plain = screen_pten_cnv.build_bins(*locus, cohort_dir / "ref.fa", 0.2)
-    gzipped = screen_pten_cnv.build_bins(*locus, ref_gz, 0.2)
+    plain = screen_region_cnv.build_bins(*locus, cohort_dir / "ref.fa", 0.2)
+    gzipped = screen_region_cnv.build_bins(*locus, ref_gz, 0.2)
 
     assert np.array_equal(plain[0], gzipped[0])
     assert np.array_equal(plain[3], gzipped[3])
     assert np.allclose(plain[2], gzipped[2])
+
+
+def test_arbitrary_locus_is_supported(run_cli, tmp_path):
+    """Regression: the screened locus used to be a hard-coded PTEN interval, so any other
+    --target either aborted or silently screened PTEN inside a window that happened to
+    contain it.
+
+    A target away from the simulated CNV must run and call every sample NORMAL.
+    """
+    prefix = tmp_path / "offscreen"
+    run_cli(prefix, "--target", "chr10:130000-150000")
+
+    rows = read_tsv(Path(f"{prefix}.all_samples.tsv"))
+    assert {row["status"] for row in rows.values()} == {"OK"}
+    assert {row["cnv_call"] for row in rows.values()} == {"NORMAL"}
+    assert all(int(row["total_target_bins"]) >= 2 for row in rows.values())
+
+
+def test_scan_window_is_fitted_when_not_given(run_cli, tmp_path):
+    """Without --scan the window is fitted around the target, clamped to the contig, so a
+    locus away from the historical 80-96 Mb PTEN window still works."""
+    prefix = tmp_path / "fitted"
+    run_cli(prefix, scan=False)
+
+    rows = read_tsv(Path(f"{prefix}.all_samples.tsv"))
+    assert {row["status"] for row in rows.values()} == {"OK"}
+    assert rows[make_pten_cnv_fixtures.DEL_SAMPLE]["cnv_call"] == "DEL"
+    assert rows[make_pten_cnv_fixtures.DUP_SAMPLE]["cnv_call"] == "DUP"
+
+
+def test_scan_window_resolution_rules():
+    """The window keeps the historical PTEN default, fits any other target, and refuses to
+    screen a target that it does not contain."""
+    lengths = {"chr10": 248_956_422, "chr1": 248_956_422, "chr5": 181_538_259}
+
+    assert screen_region_cnv.resolve_scan_window(
+        "chr10", 87_863_625, 87_971_930, None, lengths) == (80_000_000, 96_000_000, "default")
+
+    # +/- 8 Mb around the target, clamped to the contig instead of leaving it
+    assert screen_region_cnv.resolve_scan_window(
+        "chr5", 60_000_000, 60_100_000, None, lengths) == (52_000_000, 68_100_000, "fitted")
+    assert screen_region_cnv.resolve_scan_window(
+        "chr1", 5_000_000, 5_100_000, None, lengths) == (1, 13_100_000, "fitted")
+    assert screen_region_cnv.resolve_scan_window(
+        "chr1", 200_000_000, 200_100_000, None, {"chr1": 205_000_000}) == (192_000_000, 205_000_000, "fitted")
+
+    # an explicit window is a region string too, commas included
+    assert screen_region_cnv.resolve_scan_window(
+        "chr10", 87_863_625, 87_971_930, "chr10:80,000,000-96,000,000", lengths) == (
+            80_000_000, 96_000_000, "explicit")
+
+    # a window that does not contain the target must be an error, not an empty scan
+    with pytest.raises(SystemExit) as excinfo:
+        screen_region_cnv.resolve_scan_window("chr10", 87_863_625, 87_971_930, "chr10:1-50000000", lengths)
+    assert "not inside the scan window" in str(excinfo.value)
+
+    # target and window on different chromosomes are meaningless together
+    with pytest.raises(SystemExit) as excinfo:
+        screen_region_cnv.resolve_scan_window("chr10", 87_863_625, 87_971_930, "chr5:1-50000000", lengths)
+    assert "same chromosome" in str(excinfo.value)
+
+
+def test_region_string_parsing():
+    """--target/--scan follow the samtools/bcftools 'chr:start-end' convention (1-based,
+    inclusive); a bare contig means the whole chromosome."""
+    lengths = {"chr10": 248_956_422, "chr5": 181_538_259}
+
+    assert screen_region_cnv.parse_region("chr10:1000-2000", "--target", lengths) == ("chr10", 1_000, 2_000)
+    assert screen_region_cnv.parse_region("chr10:87,863,625-87,971,930", "--target", lengths) == (
+        "chr10", 87_863_625, 87_971_930)
+    assert screen_region_cnv.parse_region("chr10", "--target", lengths) == ("chr10", 1, 248_956_422)
+
+    # the built-in default is PTEN, and any other locus is just another region string
+    assert screen_region_cnv.resolve_target_region(None, lengths) == ("chr10", 87_863_625, 87_971_930)
+    assert screen_region_cnv.resolve_target_region("chr5:1-1000", lengths) == ("chr5", 1, 1_000)
+
+    for bad in ("chr10:1000", "chr10:2000-1000", "chr10:0-100", "chr10:", "chr10:1000-abc"):
+        with pytest.raises(SystemExit):
+            screen_region_cnv.parse_region(bad, "--target", lengths)
+
+    # a contig the alignment files do not have fails once, up front
+    with pytest.raises(SystemExit) as excinfo:
+        screen_region_cnv.resolve_target_region("chr99:1-1000", lengths)
+    assert "not in the alignment header" in str(excinfo.value)
+
+    # ... and so does a target past the contig end
+    with pytest.raises(SystemExit) as excinfo:
+        screen_region_cnv.resolve_target_region("chr10:1-999999999", lengths)
+    assert "beyond the length" in str(excinfo.value)
+
+
+def test_plots_are_off_by_default(run_cli, tmp_path):
+    """Without --plot-dir nothing is drawn, and matplotlib is never imported."""
+    prefix = tmp_path / "no_plots"
+    run_cli(prefix)
+    assert not list(tmp_path.rglob("*.png"))
+
+
+def test_missing_matplotlib_exits_with_install_hint(monkeypatch):
+    """--plot-dir on a box without matplotlib must fail once, with a usable hint."""
+    monkeypatch.setitem(sys.modules, "matplotlib", None)
+    with pytest.raises(SystemExit) as excinfo:
+        screen_region_cnv.load_pyplot()
+    assert "pip install matplotlib" in str(excinfo.value)
+
+
+def test_plot_dir_writes_overview_and_only_candidate_figures(cohort_dir, run_cli, tmp_path):
+    """One figure for the whole cohort, plus per-sample figures just for the candidates."""
+    pytest.importorskip("matplotlib")
+
+    prefix = tmp_path / "with_plots"
+    plot_dir = tmp_path / "figs"
+    run_cli(prefix, "--plot-dir", str(plot_dir))
+
+    pngs = list(plot_dir.glob("*.png"))
+    expected = {"cohort_overview", make_pten_cnv_fixtures.DEL_SAMPLE,
+                make_pten_cnv_fixtures.DUP_SAMPLE}
+    assert {p.stem for p in pngs} == expected
+    assert all(p.stat().st_size > 5_000 for p in pngs)
+
+
+def test_plot_samples_adds_the_requested_figures(cohort_dir, run_cli, tmp_path):
+    """--plot-samples follows up on the overview: named ids, or 'all' for the cohort."""
+    pytest.importorskip("matplotlib")
+
+    wanted = make_pten_cnv_fixtures.NORMAL_SAMPLES[0]
+    one_dir, all_dir = tmp_path / "one", tmp_path / "all"
+    run_cli(tmp_path / "one", "--plot-dir", str(one_dir), "--plot-samples", wanted)
+    run_cli(tmp_path / "all", "--plot-dir", str(all_dir), "--plot-samples", "all")
+
+    assert wanted in {p.stem for p in one_dir.glob("*.png")}
+    assert "cohort_overview" in {p.stem for p in one_dir.glob("*.png")}
+    assert {p.stem for p in all_dir.glob("*.png")} == {"cohort_overview", *all_sample_ids()}
+
+
+def test_unknown_plot_sample_warns_without_failing(cohort_dir, run_cli, tmp_path, capsys):
+    """A mistyped id must be reported, not turn the whole run into an error."""
+    pytest.importorskip("matplotlib")
+
+    prefix = tmp_path / "typo"
+    plot_dir = tmp_path / "typo_figs"
+    run_cli(prefix, "--plot-dir", str(plot_dir), "--plot-samples", "NO_SUCH_SAMPLE")
+
+    assert "NO_SUCH_SAMPLE" in capsys.readouterr().err
+    assert prefix.with_suffix(".all_samples.tsv").exists()
+
+
+def test_figures_are_skipped_when_the_cohort_fails_qc(run_cli, tmp_path):
+    """A cohort that never reaches normalization produces no figures, only the report."""
+    pytest.importorskip("matplotlib")
+
+    prefix = tmp_path / "failed_cohort"
+    plot_dir = tmp_path / "failed_figs"
+    with pytest.raises(SystemExit):
+        run_cli(prefix, "--plot-dir", str(plot_dir), "--min-library-reads", "100000000")
+    assert not list(plot_dir.glob("*.png"))

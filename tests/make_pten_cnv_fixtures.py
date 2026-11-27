@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Deterministic fixture generator for tests/test_screen_pten_cnv.py.
+Deterministic fixture generator for tests/test_screen_region_cnv.py.
 
-Builds a tiny synthetic BAM cohort that exercises scripts/screen_pten_cnv.py:
+Builds a tiny synthetic BAM cohort that exercises scripts/screen_region_cnv.py:
   * 10 normal samples, 1 sample with a 50% deletion, 1 with a 100% duplication
-    inside a 20 kb window that overlaps the (test-shrunk) PTEN core locus
-  * a 600 kb three-contig reference so GC correction and autosomal library
+    inside a 20 kb window that overlaps the (test-shrunk) target locus
+  * a 600 kb three-contig reference so GC correction and library-size
     normalization are both engaged
 
 The real PTEN coordinates (chr10:87.86-87.97 Mb) would need an ~88 Mb FASTA, so
-the tests instead patch screen_pten_cnv.PTEN_CORE_START/END to TEST_PTEN_START/END
-below and scan [SCAN_START, SCAN_END] of these short contigs.
+the tests instead patch screen_region_cnv.DEFAULT_TARGET_REGION to the TEST_PTEN_*
+locus below and scan [SCAN_START, SCAN_END] of these short contigs.
 
 Usage:
     python tests/make_pten_cnv_fixtures.py            # write fixtures if missing
