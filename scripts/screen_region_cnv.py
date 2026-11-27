@@ -15,7 +15,12 @@ Uses ONLY pysam for BAM/CRAM and FASTA operations, combined with:
      reads inside the scan window, reported as library_norm_source=region)
   2) Per-sample GC-content stratification correction (when --ref-fasta is given)
   3) Cohort-wide bin median & robust MAD Z-score normalization
-  4) Optional figures (--plot-dir, needs matplotlib): one cohort overview figure plus
+  4) Optional noise gate (--max-flanking-mad): a contaminated library inflates the
+     cohort's bin-wise spread and hides real events, so the samples whose flanking
+     MAD exceeds the threshold are excluded from the Z scale and flagged
+     noise_status=HIGH_MAD; their calls are kept, but they are listed in
+     <out-prefix>.high_noise.tsv instead of the candidate table
+  5) Optional figures (--plot-dir, needs matplotlib): one cohort overview figure plus
      per-sample profiles for the called candidates; --plot-samples narrows that to the
      samples it names ('all' for every sample, 'candidates,<id>' to keep the candidates)
 
@@ -106,6 +111,17 @@ def fraction(value: str) -> float:
     return number
 
 
+def non_negative_float(value: str) -> float:
+    """argparse type for optional thresholds, where 0 means 'feature disabled'."""
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number, got '{value}'")
+    if number < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {number}")
+    return number
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Screen CNVs in a target region (default: chr10 PTEN) from NIPT BAM/CRAM files using pysam."
@@ -123,6 +139,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("-t", "--threads", type=positive_int, default=16, help="Number of parallel worker processes (default: 16).")
     p.add_argument("--min-library-reads", type=non_negative_int, default=10000, help="Minimum library size of a sample: mapped reads from the index, or usable reads in the scan window for CRAM (default: 10000).")
     p.add_argument("--min-valid-samples", type=positive_int, default=10, help="Minimum number of QC-passing samples required for cohort normalization (default: 10).")
+    p.add_argument(
+        "--max-flanking-mad",
+        type=non_negative_float,
+        default=0.0,
+        help="Noise gate: a sample whose flanking copy-ratio MAD is above this is flagged "
+             "noise_status=HIGH_MAD, left out of the cohort Z scale, and listed in "
+             "<out-prefix>.high_noise.tsv instead of the candidate table; its DEL/DUP call "
+             "is still reported (0 = disabled, the default). Calibrate it from the "
+             "flanking_mad column of a first unfiltered run.",
+    )
     p.add_argument("--save-matrix", action="store_true", help="Save normalized copy-ratio matrix (.tsv.gz) for downstream segmentation.")
     p.add_argument("--plot-dir", type=Path, default=None, help="Write a cohort overview figure into this directory, plus a PNG for each called candidate (or only the samples named by --plot-samples); needs matplotlib, off by default.")
     p.add_argument("--plot-samples", metavar="ID[,ID...]|all|candidates", default=None,
@@ -794,6 +820,7 @@ def plot_cohort_overview(
                       f"(full list in the candidates table)")
     else:
         rank_title = "copy ratio by rank: the tails are the candidates"
+
     ax_rank.set_xlabel("samples (sorted)")
     ax_rank.set_ylabel("target mean copy ratio")
     ax_rank.set_title(rank_title, fontsize=9, loc="left")
@@ -808,16 +835,19 @@ def plot_cohort_overview(
     ax_qc.axhline(1.0, color="black", lw=0.8)
     for gate in (DEL_COPY_RATIO_MAX, DUP_COPY_RATIO_MIN):
         ax_qc.axhline(gate, color="#d62728", lw=0.7, ls="--")
+
     finite_mad = flank_mad[np.isfinite(flank_mad) & (flank_mad > 0)]
     # A log axis only helps when the cohort's noise really spans orders of magnitude.
     if finite_mad.size and float(finite_mad.max()) > 20 * float(finite_mad.min()):
         ax_qc.set_xscale("log")
+
     ax_qc.set_xlabel("flanking MAD of the copy ratio")
     ax_qc.set_ylabel("target mean copy ratio")
     ax_qc.set_title("significance vs noise: high and far right = noisy, not a CNV",
                     fontsize=9, loc="left")
     for label, colour in (("NORMAL", "#999999"), ("DEL", "#d62728"), ("DUP", "#1f77b4")):
         ax_qc.scatter([], [], s=14, c=colour, label=label)
+
     ax_qc.legend(loc="upper right", fontsize=6, frameon=False)
     if finite_cr.size:
         ax_qc.set_ylim(float(finite_cr.min()) - pad, float(finite_cr.max()) + pad)
@@ -830,7 +860,7 @@ def plot_cohort_overview(
 ALL_COLUMNS = [
     "sample_id", "status", "library_reads", "library_norm_source", "flanking_mad",
     "target_mean_copy_ratio", "target_mean_zscore", "target_peak_zscore",
-    "target_abnormal_bins", "total_target_bins", "cnv_call",
+    "target_abnormal_bins", "total_target_bins", "cnv_call", "noise_status",
     "est_cnv_start", "est_cnv_end", "est_cnv_size_bp",
 ]
 
@@ -851,6 +881,7 @@ def qc_failed_row(
         "target_abnormal_bins": "NA",
         "total_target_bins": n_target_bins,
         "cnv_call": cnv_call,
+        "noise_status": "NA",
         "est_cnv_start": "NA",
         "est_cnv_end": "NA",
         "est_cnv_size_bp": "NA"
@@ -881,6 +912,31 @@ def print_status_summary(statuses: List[str]) -> None:
         
     for code, (count, example) in sorted(groups.items(), key=lambda item: -item[1][0]):
         print(f"    {count:>8} sample(s): {example}", file=sys.stderr, flush=True)
+
+
+def cohort_bin_mad(
+    copy_ratio: np.ndarray,
+    max_flanking_mad: float = 0.0,
+    min_samples: int = 1,
+    bin_mask: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Bin-wise MAD of the copy ratio, estimated from the noise-filtered samples only.
+
+    A contaminated library inflates the bin-wise spread, which inflates every Z-score and
+    so hides real events in the rest of the cohort: the noise gate has to feed back into
+    the Z scale, not only into the per-sample verdict. Returns (bin_mad, gate_mask), where
+    gate_mask marks the samples that pass the gate; bin_mad silently falls back to every
+    measured sample when fewer than min_samples of them pass it.
+    bin_mask selects the bins the gate is measured on (the flanking bins, so that a real
+    event in the target does not make its own carrier look noisy).
+    """
+    measure = copy_ratio if bin_mask is None else copy_ratio[:, bin_mask]
+    flank = np.nanmedian(np.abs(measure - 1.0), axis=1)
+    gate = np.isfinite(flank)
+    if max_flanking_mad > 0:
+        gate &= flank <= max_flanking_mad
+    used = gate if int(gate.sum()) >= min_samples else np.isfinite(flank)
+    return np.nanmedian(np.abs(copy_ratio[used] - 1.0), axis=0), gate
 
 
 def main() -> None:
@@ -945,6 +1001,7 @@ def main() -> None:
             draw_candidates = False
         if plt_backend is None:
             print("[WARN] --plot-samples only applies together with --plot-dir.", file=sys.stderr)
+
     if plt_backend is not None:
         wanted = []
         if plot_all:
@@ -1013,11 +1070,13 @@ def main() -> None:
                 status_list[task_idx] = f"WorkerError: {type(exc).__name__}: {exc}"
                 completed += 1
                 continue
+
             status_list[idx] = status
             lib_reads[idx] = n_reads
             lib_source[idx] = depth_source
             if norm_counts is not None:
                 raw_matrix[idx, :] = norm_counts
+
             completed += 1
             if completed % 5000 == 0 or completed == total_input:
                 print(f"[PROGRESS] Processed {completed}/{total_input} samples...", file=sys.stderr)
@@ -1053,22 +1112,42 @@ def main() -> None:
     sample_medians = np.where(np.isfinite(sample_medians) & (sample_medians > 0), sample_medians, 1.0)
     copy_ratio = copy_ratio / sample_medians
 
-    # Robust bin-wise MAD standard deviation & Z-score matrix.
-    # Bins with a near-zero MAD (all-zero or perfectly flat bins) must not produce
-    # an infinite Z, nor be silently dropped: use a floor derived from the cohort.
-    bin_mad = np.nanmedian(np.abs(copy_ratio - 1.0), axis=0)
+    # Noise gate: the flanking MAD is measured outside the target bins, so a genuine
+    # event in the target does not make its own carrier look noisy. 0 disables the gate.
+    noise_threshold = float(args.max_flanking_mad)
+    flank_mask = np.ones(len(bin_starts), dtype=bool)
+    flank_mask[target_indices] = False
+    if not flank_mask.any():  # a window that is nothing but target bins has no flanking bins
+        flank_mask[:] = True
+
+    bin_mad, gate_mask = cohort_bin_mad(
+        copy_ratio, noise_threshold, args.min_valid_samples, flank_mask
+    )
     robust_sd = bin_mad * 1.4826
     finite_sd = robust_sd[np.isfinite(robust_sd) & (robust_sd > 0)]
     sd_floor = max(float(np.median(finite_sd)) * 0.1, 1e-6) if finite_sd.size else 1e-6
     robust_sd = np.where(np.isfinite(robust_sd) & (robust_sd > sd_floor), robust_sd, sd_floor)
     z_matrix = (copy_ratio - 1.0) / robust_sd
 
+    if noise_threshold > 0:
+        n_clean = int(gate_mask.sum())
+        if n_clean >= args.min_valid_samples:
+            gate_note = f"{n_clean}/{n_valid} sample(s) defined the cohort Z scale."
+        else:
+            gate_note = (f"only {n_clean}/{n_valid} sample(s) passed it, fewer than "
+                         f"--min-valid-samples ({args.min_valid_samples}), so the Z scale fell "
+                         f"back to the whole cohort: lower --min-valid-samples to let the "
+                         f"gate take effect.")
+        print(f"[INFO] --max-flanking-mad {noise_threshold:g}: {gate_note}", file=sys.stderr)
+
     # Evaluate target-region metrics per valid sample
     candidate_rows: List[Dict[str, object]] = []
+    high_noise_rows: List[Dict[str, object]] = []
     report_rows: List[Dict[str, object]] = []
     n_plots = 0
     n_plot_errors = 0
     first_plot_error: Optional[Exception] = None
+
     # Collected for the single cohort overview figure (one row per QC-passing sample).
     ov_sids: List[str] = []
     ov_calls: List[str] = []
@@ -1091,7 +1170,13 @@ def main() -> None:
         z_row = z_matrix[v_ptr, :]
         v_ptr += 1
 
-        flank_mad = float(np.nanmedian(np.abs(cr_row - 1.0)))
+        flank_mad = float(np.nanmedian(np.abs(cr_row[flank_mask] - 1.0)))
+        # Report the call either way: the noise gate flags a sample, it never erases the
+        # DEL/DUP verdict, because a real event in a noisy library is still a real event.
+        noise_status = "OK"
+        if noise_threshold > 0 and (not np.isfinite(flank_mad) or flank_mad > noise_threshold):
+            noise_status = "HIGH_MAD"
+
         target_cr = float(np.nanmean(cr_row[target_indices]))
         target_z_vals = z_row[target_indices]
         finite_z = np.isfinite(target_z_vals)
@@ -1132,13 +1217,20 @@ def main() -> None:
             "target_abnormal_bins": abn_bins,
             "total_target_bins": len(target_indices),
             "cnv_call": ctype,
+            "noise_status": noise_status,
             "est_cnv_start": c_start if ctype not in ("NORMAL", "NO_SIGNAL") else "NA",
             "est_cnv_end": c_end if ctype not in ("NORMAL", "NO_SIGNAL") else "NA",
             "est_cnv_size_bp": c_size if ctype not in ("NORMAL", "NO_SIGNAL") else "NA",
         }
+
         report_rows.append(row_dict)
-        if ctype not in ("NORMAL", "NO_SIGNAL"):
+        # Candidates are the calls a reviewer should look at; a high-noise sample goes to its
+        # own table instead, so the candidate list stays trustworthy.
+        if noise_status == "HIGH_MAD":
+            high_noise_rows.append(row_dict)
+        elif ctype not in ("NORMAL", "NO_SIGNAL"):
             candidate_rows.append(row_dict)
+
         ov_sids.append(sid)
         ov_calls.append(ctype)
         ov_target_cr.append(target_cr)
@@ -1148,7 +1240,7 @@ def main() -> None:
         if plt_backend is not None and (
             plot_all
             or sid in plot_requested
-            or (draw_candidates and ctype not in ("NORMAL", "NO_SIGNAL"))
+            or (draw_candidates and noise_status == "OK" and ctype not in ("NORMAL", "NO_SIGNAL"))
         ):
             figure_name = unique_figure_name(safe_filename(sid), used_figure_names)
             try:
@@ -1160,6 +1252,7 @@ def main() -> None:
                 n_plots += 1
                 plotted_ids.add(sid)
                 written_figures.add(figure_name)
+
             except Exception as exc:  # a figure must never abort a finished analysis
                 n_plot_errors += 1
                 if first_plot_error is None:
@@ -1167,6 +1260,9 @@ def main() -> None:
 
     write_report(all_out, report_rows)
     write_report(cand_out, candidate_rows)
+    if noise_threshold > 0:
+        # Only meaningful when the gate is on: an always-empty table just adds noise.
+        write_report(Path(f"{args.out_prefix}.high_noise.tsv"), high_noise_rows)
 
     if plot_dir is not None:
         overview_path = plot_dir / "cohort_overview.png"
@@ -1179,19 +1275,23 @@ def main() -> None:
             )
             print(f"[INFO] Wrote cohort overview {overview_path}", file=sys.stderr)
             written_figures.add(overview_path.name)
+
         except Exception as exc:  # same rule as the per-sample figures
             n_plot_errors += 1
             if first_plot_error is None:
                 first_plot_error = exc
+
         print(f"[INFO] Wrote {n_plots} per-sample figure(s) to {plot_dir}", file=sys.stderr)
         if n_plot_errors:
             print(f"[WARN] {n_plot_errors} figure(s) could not be written (first error: "
                   f"{type(first_plot_error).__name__}: {first_plot_error})", file=sys.stderr)
+
         if plot_requested:
             missing = sorted(plot_requested - plotted_ids)
             if missing:
                 print(f"[WARN] No figure for {', '.join(missing)}: unknown sample id or the "
                       f"sample did not pass QC.", file=sys.stderr)
+
         stale = sorted(p.name for p in plot_dir.glob("*.png") if p.name not in written_figures)
         if stale:
             shown = ", ".join(stale[:5]) + (" ..." if len(stale) > 5 else "")
@@ -1221,8 +1321,15 @@ def main() -> None:
         print(f"[INFO] {n_region}/{total_input} sample(s) used a window-based library size "
               f"(no per-contig counters in the index, e.g. CRAM/.crai). Per-sample scale "
               f"cancels out in the cohort/sample median normalization.", file=sys.stderr)
+
     if n_no_signal:
         print(f"[WARN] {n_no_signal} sample(s) had no usable target-region signal (called NO_SIGNAL).", file=sys.stderr)
+    if noise_threshold > 0 and high_noise_rows:
+        n_noisy_calls = sum(1 for row in high_noise_rows if row["cnv_call"] in ("DEL", "DUP"))
+        print(f"[WARN] {len(high_noise_rows)} sample(s) exceeded --max-flanking-mad "
+              f"{noise_threshold:g} and were moved out of the candidate list"
+              f"{f' ({n_noisy_calls} still carry a DEL/DUP call)' if n_noisy_calls else ''}; "
+              f"see {args.out_prefix}.high_noise.tsv", file=sys.stderr)
     if n_valid < total_input:
         print(f"[INFO] {total_input - n_valid} sample(s) skipped, by reason:", file=sys.stderr)
         print_status_summary(status_list)

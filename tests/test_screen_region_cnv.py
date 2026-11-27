@@ -14,12 +14,14 @@ reads each, none on chr10); it is only used to check that real input without tar
 coverage is rejected, and the test skips when the link does not resolve.
 """
 
+import argparse
 import csv
 import importlib
 import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pysam
 import pytest
 
@@ -444,8 +446,6 @@ def test_reference_without_target_contig_fails_cleanly(shrunk_locus, tmp_path):
 
 def test_bgzipped_reference_gives_the_same_bins(cohort_dir, shrunk_locus, tmp_path):
     """GC strata must be identical when the reference is bgzipped (.fai/.gzi)."""
-    import numpy as np
-
     ref_gz = tmp_path / "ref.fa.gz"
     pysam.tabix_compress(str(cohort_dir / "ref.fa"), str(ref_gz), force=True)
     pysam.faidx(str(ref_gz))
@@ -615,6 +615,98 @@ def test_unknown_plot_sample_warns_without_failing(cohort_dir, run_cli, tmp_path
 
     assert "NO_SUCH_SAMPLE" in capsys.readouterr().err
     assert prefix.with_suffix(".all_samples.tsv").exists()
+
+
+
+def test_cohort_bin_mad_ignores_the_flagged_samples():
+    """The noise gate has to feed back into the Z scale, not only into the per-sample verdict:
+    a contaminated library otherwise inflates the bin-wise MAD and hides real events."""
+    rng = np.random.default_rng(0)
+    copy_ratio = np.vstack([
+        1.0 + rng.normal(0.0, 0.01, size=(8, 20)),
+        1.0 + rng.normal(0.0, 0.50, size=(2, 20)),
+    ])
+
+    mad_all, mask_all = screen_region_cnv.cohort_bin_mad(copy_ratio, 0.0, 1)
+    assert mask_all.all()                       # gate off: every measured sample counts
+    mad_clean, mask_clean = screen_region_cnv.cohort_bin_mad(copy_ratio, 0.1, 1)
+    assert mask_clean.sum() == 8 and not mask_clean[-2:].any()
+    assert np.all(mad_clean < mad_all)
+
+    # too few survivors: the mask still reports them, but the scale falls back to the cohort
+    mad_fallback, mask_fallback = screen_region_cnv.cohort_bin_mad(copy_ratio, 0.0001, 5)
+    assert not mask_fallback.any()
+    np.testing.assert_allclose(mad_fallback, mad_all, equal_nan=True)
+
+
+def test_cohort_bin_mad_measures_the_gate_outside_the_target():
+    """A real event in the target must not make its own carrier look noisy."""
+    rng = np.random.default_rng(1)
+    copy_ratio = 1.0 + rng.normal(0.0, 0.01, size=(6, 10))
+    copy_ratio[0, :6] = 0.5                     # a deletion spanning the first six bins
+    flank = np.ones(10, dtype=bool)
+    flank[:6] = False
+
+    _, mask_flank = screen_region_cnv.cohort_bin_mad(copy_ratio, 0.05, 1, flank)
+    _, mask_everything = screen_region_cnv.cohort_bin_mad(copy_ratio, 0.05, 1)
+    assert mask_flank.all()
+    assert not mask_everything[0]
+
+
+def test_flanking_mad_gate_flags_noisy_samples_without_erasing_calls(
+    cohort_dir, run_cli, tmp_path, capsys
+):
+    """--max-flanking-mad marks a high-noise sample instead of overwriting its call.
+
+    Regression: the gate used to rewrite cnv_call as NOISY_SAMPLE, which both dropped real
+    DEL/DUP calls and pushed the flagged samples into the candidate table (with est_cnv_*
+    silently zeroed).
+    """
+    prefix = tmp_path / "gate"
+    run_cli(prefix, "--max-flanking-mad", "0.015", "--min-valid-samples", "2")
+
+    rows = read_tsv(Path(f"{prefix}.all_samples.tsv"))
+    noisy = {sid for sid, row in rows.items() if row["noise_status"] == "HIGH_MAD"}
+    assert 0 < len(noisy) < len(rows)           # the gate splits this cohort
+    assert {row["cnv_call"] for row in rows.values()} >= {"DEL", "DUP"}
+
+    # a real call survives the gate, coordinates included
+    dup = rows[make_pten_cnv_fixtures.DUP_SAMPLE]
+    assert dup["cnv_call"] == "DUP"
+    assert dup["est_cnv_start"] != "NA" and dup["est_cnv_size_bp"] != "NA"
+
+    # the flagged samples get their own table, and only those
+    flagged = read_tsv(Path(f"{prefix}.high_noise.tsv"))
+    assert set(flagged) == noisy
+    assert {row["noise_status"] for row in flagged.values()} == {"HIGH_MAD"}
+
+    # the candidate table keeps exactly the clean calls
+    candidates = read_tsv(Path(f"{prefix}.candidates.tsv"))
+    assert not (noisy & set(candidates))
+    assert set(candidates) == {
+        sid for sid, row in rows.items()
+        if row["noise_status"] == "OK" and row["cnv_call"] not in ("NORMAL", "NO_SIGNAL")
+    }
+    assert "exceeded --max-flanking-mad" in capsys.readouterr().err
+
+
+def test_noise_gate_is_off_by_default(cohort_dir, run_cli, tmp_path):
+    """Without --max-flanking-mad nothing is flagged and no high_noise table is written,
+    so an existing pipeline keeps reproducing its previous numbers."""
+    prefix = tmp_path / "ungated"
+    run_cli(prefix)
+
+    assert not Path(f"{prefix}.high_noise.tsv").exists()
+    rows = read_tsv(Path(f"{prefix}.all_samples.tsv"))
+    assert {row["noise_status"] for row in rows.values()} == {"OK"}
+
+
+def test_negative_flanking_mad_is_rejected():
+    """0 means 'disabled', a negative threshold is a typo. Parse errors surface as
+    argparse.ArgumentTypeError, which argparse turns into a usage message."""
+    with pytest.raises(argparse.ArgumentTypeError):
+        screen_region_cnv.non_negative_float("-0.1")
+    assert screen_region_cnv.non_negative_float("0") == 0.0
 
 
 def test_figures_are_skipped_when_the_cohort_fails_qc(run_cli, tmp_path):
