@@ -790,3 +790,124 @@ def test_figures_are_skipped_when_the_cohort_fails_qc(run_cli, tmp_path):
     with pytest.raises(SystemExit):
         run_cli(prefix, "--plot-dir", str(plot_dir), "--min-library-reads", "100000000")
     assert not list(plot_dir.glob("*.png"))
+
+
+def test_report_rows_name_the_contig(run_cli, tmp_path):
+    """Every row carries target_chrom: a coordinate without its contig cannot be merged
+    with upstream sample sheets or handed to a genome browser."""
+    prefix = tmp_path / "chrom"
+    run_cli(prefix)
+
+    rows = read_tsv(Path(f"{prefix}.all_samples.tsv"))
+    assert {row["target_chrom"] for row in rows.values()} == {"chr10"}
+
+    by_call = {row["cnv_call"]: row for row in rows.values()}
+    assert by_call["DEL"]["est_cnv_truncated"] == "0"
+    assert by_call["NORMAL"]["est_cnv_truncated"] == "NA"
+
+    # QC-failed rows name the contig too: it is a run-level fact, not a call-level one.
+    rejected = tmp_path / "chrom_rejected"
+    with pytest.raises(SystemExit):
+        run_cli(rejected, "--min-library-reads", "100000000")
+    rejected_rows = read_tsv(Path(f"{rejected}.all_samples.tsv"))
+    assert {row["target_chrom"] for row in rejected_rows.values()} == {"chr10"}
+    assert {row["est_cnv_truncated"] for row in rejected_rows.values()} == {"NA"}
+
+
+def _edge_bins(n_bins: int):
+    starts = np.arange(n_bins, dtype=np.int64) * 1000 + 1
+    return starts, starts + 999
+
+
+def test_estimate_cnv_span_flags_window_edge_truncation():
+    """A boundary that ran into the scan window edge is a lower bound, not the event size."""
+    starts, ends = _edge_bins(10)
+    ratio = np.ones(10)
+
+    z = np.zeros(10)
+    z[4:6] = -10.0
+    call, start, end, size, truncated = screen_region_cnv.estimate_cnv_span(
+        z, ratio, starts, ends, np.array([4, 5]), 4.0)
+    assert (call, start, end, size, truncated) == ("DEL", 4001, 6000, 2000, False)
+
+    # A neighbour above the soft threshold (min(2.5, z_thresh*0.6) = 2.4) extends the span
+    # without being callable on its own.
+    z[3] = -3.0
+    _, start, end, _, truncated = screen_region_cnv.estimate_cnv_span(
+        z, ratio, starts, ends, np.array([4, 5]), 4.0)
+    assert (start, end, truncated) == (3001, 6000, False)
+
+    # The same event pushed against the left edge of the window cannot be measured.
+    z = np.zeros(10)
+    z[0:2] = -10.0
+    _, start, end, _, truncated = screen_region_cnv.estimate_cnv_span(
+        z, ratio, starts, ends, np.array([0, 1]), 4.0)
+    assert truncated is True
+
+
+def test_find_segments_reports_runs_outside_the_target():
+    """Segments are found across the whole window, so a change outside the target is not
+    invisible just because the target itself is normal."""
+    starts, ends = _edge_bins(12)
+    ratio = np.ones(12)
+
+    z = np.zeros(12)
+    z[2] = -5.0
+    z[8:10] = 6.0
+    segs = screen_region_cnv.find_segments(z, ratio, starts, ends, np.array([8, 9]), 4.0)
+    assert [(s["direction"], s["start"], s["end"], s["in_target"]) for s in segs] == [
+        ("DEL", 2001, 3000, False),
+        ("DUP", 8001, 10000, True),
+    ]
+    assert segs[0]["n_bins"] == 1 and segs[1]["n_bins"] == 2
+    assert segs[0]["peak_z"] == -5.0 and segs[1]["mean_z"] == 6.0
+
+    # The soft threshold only shapes the edges: bins that never reach --z-thresh are not
+    # reported as segments, otherwise every noisy window would produce a fake event.
+    below = np.full(12, -2.4)
+    assert screen_region_cnv.find_segments(below, ratio, starts, ends, np.array([8, 9]), 4.0) == []
+
+
+def test_find_segments_drops_contradictory_fragments_of_one_event():
+    """With --step-size below --bin-size two bins can cover the same bases with opposite
+    signs. Reporting both would call one locus DEL and DUP at once, so only the stronger
+    run survives."""
+    starts = np.arange(12, dtype=np.int64) * 500 + 1  # 1 kb bins, 500 bp step
+    ends = starts + 999
+    ratio = np.ones(12)
+
+    z = np.zeros(12)
+    z[4] = -10.0  # 2001-3000
+    z[5] = 5.0    # 2501-3500 overlaps the deletion but is weaker
+    segs = screen_region_cnv.find_segments(z, ratio, starts, ends, np.array([4]), 4.0)
+    assert [(s["direction"], s["start"], s["end"]) for s in segs] == [("DEL", 2001, 3000)]
+
+    # Runs that only touch at a boundary are not dropped: two real events stay two rows.
+    z = np.zeros(12)
+    z[2] = -10.0
+    z[8] = 8.0
+    segs = screen_region_cnv.find_segments(z, ratio, starts, ends, np.array([4]), 4.0)
+    assert [(s["direction"], s["start"], s["end"]) for s in segs] == [
+        ("DEL", 1001, 2000),
+        ("DUP", 4001, 5000),
+    ]
+
+
+def test_segments_table_matches_the_estimated_span(run_cli, tmp_path):
+    """The in-target segment and est_cnv_* describe the same run, and the table is written
+    even when the cohort carries no event at all (header only, never silently missing)."""
+    prefix = tmp_path / "segs"
+    run_cli(prefix)
+
+    with Path(f"{prefix}.segments.tsv").open(encoding="utf-8") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        assert reader.fieldnames == screen_region_cnv.SEGMENT_COLUMNS
+        seg_rows = list(reader)
+
+    candidates = read_tsv(Path(f"{prefix}.candidates.tsv"))
+    assert candidates, "the fixture cohort contains a deletion and a duplication"
+    for sid, row in candidates.items():
+        in_target = [s for s in seg_rows if s["sample_id"] == sid and s["in_target"] == "1"]
+        assert len(in_target) == 1, f"expected exactly one in-target run for {sid}"
+        assert (in_target[0]["seg_start"], in_target[0]["seg_end"]) == (
+            row["est_cnv_start"], row["est_cnv_end"])

@@ -25,6 +25,16 @@ Uses ONLY pysam for BAM/CRAM and FASTA operations, combined with:
      per-sample profiles for the called candidates; --plot-samples narrows that to the
      samples it names ('all' for every sample, 'candidates,<id>' to keep the candidates)
 
+Outputs (all under --out-prefix):
+  .all_samples.tsv       one row per input sample; every coordinate is 1-based and
+                         inclusive, target_chrom names the contig, and est_cnv_truncated
+                         flags a boundary that ran into the edge of the scan window
+  .candidates.tsv        the subset called DEL/DUP and not flagged as high noise
+  .high_noise.tsv        samples above --max-flanking-mad (written only when the gate is on)
+  .segments.tsv          every contiguous abnormal run of every QC-passing sample across
+                         the whole scan window, so events outside the target stay visible
+  .copy_ratio_matrix.tsv.gz  optional normalized bin matrix (--save-matrix)
+
 Author: Shujia Huang and Gemini & Qoder
 Date: 2026-11-27
 """
@@ -237,15 +247,18 @@ def resolve_scan_window(
         if length is not None:
             scan_start = min(scan_start, length)
             scan_end = min(scan_end, length)
+            
         source = "fitted"
     else:
         scan_chrom, scan_start, scan_end = parse_region(scan, "--scan", contig_lengths)
         if scan_chrom != chrom:
             sys.exit(f"[ERROR] --scan '{scan}' is on '{scan_chrom}' but --target is on '{chrom}'; "
                      f"both regions must be on the same chromosome.")
+            
         length = (contig_lengths or {}).get(chrom)
         if length is not None and scan_end > length:
             sys.exit(f"[ERROR] --scan '{scan}' ends beyond the length of '{chrom}' ({length} bp).")
+        
         source = "explicit"
 
     if target_start < scan_start or target_end > scan_end:
@@ -271,9 +284,11 @@ def unique_sample_id(sid: str, used: set) -> str:
     suffix = 1
     while f"{sid}_{suffix}" in used:
         suffix += 1
+        
     renamed = f"{sid}_{suffix}"
     print(f"[WARN] Duplicate sample id '{sid}': renamed to '{renamed}' for this run. Use "
           f"unique ids in --bam-list to keep the reports unambiguous.", file=sys.stderr)
+    
     used.add(renamed)
     return renamed
 
@@ -351,9 +366,11 @@ def build_bins(
             n_count = seq.count("N")
             if len(seq) == 0 or (n_count / len(seq)) > max_n_frac:
                 continue
+            
             valid_bases = len(seq) - n_count
             gc = (seq.count("G") + seq.count("C")) / valid_bases if valid_bases > 0 else 0.5
             gc_vals.append(gc)
+            
         starts.append(b_start)
         ends.append(b_end)
 
@@ -393,10 +410,10 @@ def index_library_depth(bam: pysam.AlignmentFile) -> Optional[int]:
         """
         stats 的返回值格式：
         chr1   248956422   1599044   0
-        │        │          │      └─ unmapped(落在该 contig 上的未比对 reads, 通常恒为 0)
-        │        │          └──────── mapped: chr1 上 1,599,044 条比对 reads
-        │        └─────────────────── chr1 长度 248,956,422 → GRCh38
-        └──────────────────────────── contig 名
+          │        │          │      └─ unmapped(落在该 contig 上的未比对 reads, 通常恒为 0)
+          │        │          └──────── mapped: chr1 上 1,599,044 条比对 reads
+          │        └─────────────────── chr1 长度 248,956,422 → GRCh38
+          └──────────────────────────── contig 名
         """
     except (ValueError, NotImplementedError):
         return None
@@ -441,8 +458,7 @@ def process_single_bam(
 
     try:
         if not bam.has_index():
-            return (idx, sid, None, 0, "NA",
-                    "NoIndex: missing .bai/.csi/.crai index (run samtools index)")
+            return (idx, sid, None, 0, "NA", "NoIndex: missing .bai/.csi/.crai index (run samtools index)")
 
         # 1. Library size from the index (fast, exact for BAM). CRAI indexes record no
         #    per-contig counters, so this is None for CRAM: keep library_reads at 0 and
@@ -537,8 +553,13 @@ def estimate_cnv_span(
     bin_ends: np.ndarray,
     target_indices: np.ndarray,
     z_thresh: float,
-) -> Tuple[str, int, int, int]:
-    """Expand contiguous abnormal bins outward from the target region to estimate CNV boundaries."""
+) -> Tuple[str, int, int, int, bool]:
+    """Expand contiguous abnormal bins outward from the target region to estimate CNV boundaries.
+
+    Returns (call, start, end, size_bp, truncated), where truncated means the expansion ran
+    into the edge of the scan window: the true extent is then unknown and the reported size
+    is a lower bound, not the event's length.
+    """
     target_z = z_row[target_indices]
     finite = np.isfinite(target_z)
     if finite.any():
@@ -546,6 +567,7 @@ def estimate_cnv_span(
         center_idx = int(target_indices[finite][int(np.argmax(np.abs(target_z[finite])))])
     else:
         center_idx = int(target_indices[0])
+        
     direction = -1 if z_row[center_idx] < 0 else 1
     call_type = "DEL" if direction == -1 else "DUP"
 
@@ -554,6 +576,7 @@ def estimate_cnv_span(
     left = center_idx
     while left > 0 and (z_row[left - 1] * direction) >= soft_thresh:
         left -= 1
+        
     right = center_idx
     while right < len(z_row) - 1 and (z_row[right + 1] * direction) >= soft_thresh:
         right += 1
@@ -561,7 +584,93 @@ def estimate_cnv_span(
     est_start = int(bin_starts[left])
     est_end = int(bin_ends[right])
     est_size = est_end - est_start + 1
-    return call_type, est_start, est_end, est_size
+    truncated = left == 0 or right == len(z_row) - 1
+    
+    return call_type, est_start, est_end, est_size, truncated
+
+
+def find_segments(
+    z_row: np.ndarray,
+    ratio_row: np.ndarray,
+    bin_starts: np.ndarray,
+    bin_ends: np.ndarray,
+    target_indices: np.ndarray,
+    z_thresh: float,
+) -> List[Dict[str, object]]:
+    """Contiguous abnormal runs across the whole scan window, not just around the target.
+
+    A run is anchored where |Z| reaches --z-thresh and kept while the neighbouring bins stay
+    on the same side above the softer threshold estimate_cnv_span() also uses. The hysteresis
+    is what keeps Poisson noise from splitting one event into a chain of short runs, and it
+    makes the run holding the target peak identical to est_cnv_*. Coordinates are 1-based
+    and inclusive, on the bins of the scan window; truncated_left/right mark a run that
+    reached the window edge, where the true extent is unknown.
+    """
+    soft_thresh = min(2.5, z_thresh * 0.6)
+    n_bins = len(z_row)
+    if n_bins == 0:
+        return []
+
+    if len(target_indices):
+        target_lo, target_hi = int(np.min(target_indices)), int(np.max(target_indices))
+    else:
+        target_lo = target_hi = -1
+
+    segments: List[Dict[str, object]] = []
+    for direction in (-1, 1):
+        # Work in the direction's own sign so both DEL and DUP are searched the same way.
+        aligned = z_row * direction
+        passing = np.isfinite(aligned) & (aligned >= soft_thresh)
+        i = 0
+        while i < n_bins:
+            if not passing[i]:
+                i += 1
+                continue
+            
+            j = i
+            while j + 1 < n_bins and passing[j + 1]:
+                j += 1
+                
+            run = aligned[i:j + 1]
+            # The soft threshold only shapes the edges; a run is reported only if some bin
+            # inside it is strong enough to be called on its own.
+            if float(np.max(run)) >= z_thresh:
+                segments.append({
+                    "direction": "DEL" if direction == -1 else "DUP",
+                    "start": int(bin_starts[i]),
+                    "end": int(bin_ends[j]),
+                    "size_bp": int(bin_ends[j]) - int(bin_starts[i]) + 1,
+                    "n_bins": j - i + 1,
+                    "mean_copy_ratio": float(np.nanmean(ratio_row[i:j + 1])),
+                    "mean_z": float(np.mean(z_row[i:j + 1])),
+                    "peak_z": float(direction * np.max(run)),
+                    "in_target": not (j < target_lo or i > target_hi),
+                    "truncated_left": i == 0,
+                    "truncated_right": j == n_bins - 1,
+                })
+                
+            i = j + 1
+
+    segments.sort(key=lambda seg: (int(seg["start"]), str(seg["direction"])))
+
+    # Overlapping bins (--step-size smaller than --bin-size) make neighbouring bins share
+    # reads, so one locus can be cut into fragments with opposite sign: a deletion whose
+    # bins straddle the target edges is reported twice, once as DEL and once as a small
+    # DUP. Keep the strongest run per interval and drop the fragments it covers, otherwise
+    # the table contradicts itself.
+    segments.sort(key=lambda seg: -abs(float(seg["mean_z"])))
+    kept: List[Dict[str, object]] = []
+    for seg in segments:
+        overlaps = any(
+            int(seg["start"]) <= int(other["end"]) and int(other["start"]) <= int(seg["end"])
+            for other in kept
+        )
+        if not overlaps:
+            kept.append(seg)
+
+    kept.sort(key=lambda seg: (int(seg["start"]), str(seg["direction"])))
+    
+    return kept
 
 
 def fmt_num(value: float, digits: int) -> str:
@@ -577,6 +686,7 @@ def load_pyplot() -> Any:
         import matplotlib.pyplot as plt
     except ImportError:
         sys.exit("[ERROR] --plot-dir needs matplotlib: pip install matplotlib")
+        
     return plt
 
 
@@ -596,6 +706,7 @@ def unique_figure_name(base: str, used: set) -> str:
     while name in used or name == "cohort_overview.png":
         suffix += 1
         name = f"{base}_{suffix}.png"
+        
     used.add(name)
     return name
 
@@ -670,12 +781,14 @@ def plot_sample(
     ax_cr.axhline(1.0, color="black", lw=0.8)
     for gate in (DEL_COPY_RATIO_MAX, DUP_COPY_RATIO_MIN):
         ax_cr.axhline(gate, color="#d62728", lw=0.7, ls="--")
+        
     if event_mb is not None:
         ax_cr.annotate(
             f"{call} {est_start:,}-{est_end:,} ({int(row['est_cnv_size_bp']) / 1000:.1f} kb)",
             xy=(event_mb[0], 1.0), xytext=(4, 8), textcoords="offset points",
             fontsize=8, color=event_color,
         )
+    
     ax_cr.set_ylabel("copy ratio")
     ax_cr.set_title(f"target +/- {PLOT_FLANK_BP / 1e6:g} Mb", fontsize=8, loc="left")
 
@@ -684,6 +797,7 @@ def plot_sample(
     ax_z.axhline(0.0, color="black", lw=0.8)
     for thr in (-z_thresh, z_thresh):
         ax_z.axhline(thr, color="#d62728", lw=0.7, ls="--")
+
     ax_z.set_ylabel("Z-score")
     ax_z.set_xlabel(f"position on {chrom} (Mb)")
     ax_z.set_title(f"threshold |Z| >= {z_thresh:g}", fontsize=8, loc="left")
@@ -710,13 +824,16 @@ def value_range(
         kept = np.asarray(mask, dtype=bool)
         if kept.any():
             arr = arr[kept]
+            
     finite = arr[np.isfinite(arr)]
     if not finite.size:
         return None
+    
     pad = max(pad_min, pad_frac * float(np.ptp(finite)))
     lo, hi = float(finite.min()) - pad, float(finite.max()) + pad
     if lo_bound is not None:
         lo = max(lo, lo_bound)
+        
     return (lo, hi) if hi > lo else None
 
 
@@ -737,19 +854,23 @@ def mark_offscale(
     for x, y in zip(np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)):
         if not (np.isfinite(x) and np.isfinite(y)):
             continue
+        
         y_off = ylim is not None and (y < ylim[0] or y > ylim[1])
         x_off = xlim is not None and (x < xlim[0] or x > xlim[1])
         if not (y_off or x_off):
             continue
+        
         xc = x if not x_off else (xlim[1] if x > xlim[1] else xlim[0])
         yc = y if not y_off else (ylim[1] if y > ylim[1] else ylim[0])
         if y_off:
             marker = "^" if y > ylim[1] else "v"
         else:
             marker = ">" if x > xlim[1] else "<"
+        
         ax.plot([xc], [yc], marker=marker, ms=5, mfc="none", mec=colour, mew=0.9,
                 ls="none", clip_on=False)
         n_off += 1
+        
     return n_off
 
 
@@ -815,6 +936,7 @@ def plot_cohort_overview(
     else:
         cmap = cmap.copy()
         cmap.set_bad("#dddddd")
+        
     # imshow spreads the columns evenly over the whole span, which silently moves a colour
     # block when --max-n-frac dropped bins and left gaps. Only even grids may use it.
     uniform = n_cols < 3 or bool(np.allclose(np.diff(centres_mb), np.diff(centres_mb)[0], rtol=1e-6))
@@ -834,8 +956,10 @@ def plot_cohort_overview(
         edges[-1] = centres_mb[-1] + (centres_mb[-1] - centres_mb[-2]) / 2
         im = ax_hm.pcolormesh(edges, np.arange(n + 1), masked, cmap=cmap, vmin=0.5, vmax=1.5)
         ax_hm.set_ylim(n, 0)
+
     for edge in (target_start / 1e6, target_end / 1e6):
         ax_hm.axvline(edge, color="black", lw=0.8, ls="--")
+
     ax_hm.set_xlabel(f"position on {chrom} (Mb)")
     ax_hm.set_ylabel(f"samples, sorted by target copy ratio (n={n})")
     ax_hm.set_title("copy ratio; the target region sits between the dashed lines",
@@ -862,6 +986,7 @@ def plot_cohort_overview(
         positions = [pos for pos, _sid, c in ranked_calls if c == call]
         if positions:
             extremes.add(positions[0] if call == "DEL" else positions[-1])
+
     labelled: set = set()
     last_pos = -min_gap - 1
     for pos, _sid, _call in ranked_calls:
@@ -874,6 +999,7 @@ def plot_cohort_overview(
     ax_rank.axhline(1.0, color="black", lw=0.8)
     for gate in (DEL_COPY_RATIO_MAX, DUP_COPY_RATIO_MIN):
         ax_rank.axhline(gate, color="#d62728", lw=0.7, ls="--")
+        
     stack = {"DEL": 0, "DUP": 0}  # stagger labels when two dots sit at nearly the same height
     for rank, (call, value, sid) in enumerate(zip(call_sorted, cr_sorted, sid_sorted), start=1):
         if call in call_colours:
@@ -889,6 +1015,7 @@ def plot_cohort_overview(
                     xytext=(0, dy), textcoords="offset points",
                     ha=ha, fontsize=6, color=call_colours[call], annotation_clip=True,
                 )
+                
     if len(labelled) < n_cand:
         rank_title = (f"copy ratio by rank: {n_cand} candidates, extremes labelled "
                       f"(full list in the candidates table)")
@@ -906,6 +1033,7 @@ def plot_cohort_overview(
         n_off = mark_offscale(ax_rank, np.arange(1, n + 1), target_cr, None, cr_range)
         if n_off:
             rank_title += f"; {n_off} off-scale sample(s)"
+            
     ax_rank.set_title(rank_title, fontsize=9, loc="left")
 
     # 3) quality context: an outlier copy ratio inside a noisy sample is not a CNV
@@ -923,6 +1051,7 @@ def plot_cohort_overview(
     log_axis = bool(finite_mad.size and float(finite_mad.max()) > 20 * float(finite_mad.min()))
     if log_axis:
         ax_qc.set_xscale("log")
+        
     if noisy_mask.any():  # same rule as the y axis: only the noise gate re-scales x
         if log_axis:
             clean_mad = flank_mad[clean_mask & np.isfinite(flank_mad) & (flank_mad > 0)]
@@ -964,12 +1093,25 @@ ALL_COLUMNS = [
     "sample_id", "status", "library_reads", "library_norm_source", "flanking_mad",
     "target_mean_copy_ratio", "target_mean_zscore", "target_peak_zscore",
     "target_abnormal_bins", "total_target_bins", "cnv_call", "noise_status",
-    "est_cnv_start", "est_cnv_end", "est_cnv_size_bp",
+    "est_cnv_start", "est_cnv_end", "est_cnv_size_bp", "est_cnv_truncated",
+    "target_chrom",
+]
+
+# One row per contiguous abnormal run of a sample, across the whole scan window. Separate
+# from ALL_COLUMNS because a sample can carry several runs and the two tables answer
+# different questions ('did the target change?' vs 'where are the changes?'). seg_index
+# numbers the runs of one sample in position order (1-based), so it is a sort key inside a
+# sample, not a unique id: (sample_id, chrom, seg_start, seg_end) is the real key.
+SEGMENT_COLUMNS = [
+    "sample_id", "chrom", "seg_start", "seg_end", "seg_size_bp", "seg_index",
+    "direction", "n_bins", "mean_copy_ratio", "mean_z", "peak_z",
+    "in_target", "noise_status", "truncated_left", "truncated_right",
 ]
 
 
 def qc_failed_row(
-    sid: str, status: str, library_reads: int, library_source: str, n_target_bins: int, cnv_call: str = "FAILED_QC"
+    sid: str, chrom: str, status: str, library_reads: int, library_source: str,
+    n_target_bins: int, cnv_call: str = "FAILED_QC",
 ) -> Dict[str, object]:
     """Per-sample report row for a sample that was not evaluated against the cohort."""
     return {
@@ -987,13 +1129,15 @@ def qc_failed_row(
         "noise_status": "NA",
         "est_cnv_start": "NA",
         "est_cnv_end": "NA",
-        "est_cnv_size_bp": "NA"
+        "est_cnv_size_bp": "NA",
+        "est_cnv_truncated": "NA",
+        "target_chrom": chrom,
     }
 
 
-def write_report(path: Path, rows: List[Dict[str, object]]) -> None:
+def write_report(path: Path, rows: List[Dict[str, object]], columns: Optional[List[str]] = None) -> None:
     with path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=ALL_COLUMNS, delimiter="\t")
+        writer = csv.DictWriter(fh, fieldnames=columns or ALL_COLUMNS, delimiter="\t")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -1247,7 +1391,8 @@ def main() -> None:
         # sample is lost and the run is impossible to diagnose.
         write_report(all_out, [
             qc_failed_row(
-                sid, status_list[i], int(lib_reads[i]), lib_source[i], len(target_indices),
+                sid, chrom, status_list[i], int(lib_reads[i]), lib_source[i],
+                len(target_indices),
                 "FAILED_QC" if status_list[i] != "OK" else "NOT_EVALUATED",
             )
             for i, (sid, _) in enumerate(sample_bams)
@@ -1297,6 +1442,8 @@ def main() -> None:
     candidate_rows: List[Dict[str, object]] = []
     high_noise_rows: List[Dict[str, object]] = []
     report_rows: List[Dict[str, object]] = []
+    segment_rows: List[Dict[str, object]] = []
+    n_seg_samples = 0
     n_plots = 0
     n_plot_errors = 0
     first_plot_error: Optional[Exception] = None
@@ -1316,7 +1463,8 @@ def main() -> None:
     for orig_idx, (sid, _) in enumerate(sample_bams):
         if not valid_mask[orig_idx]:
             report_rows.append(qc_failed_row(
-                sid, status_list[orig_idx], int(lib_reads[orig_idx]), lib_source[orig_idx], len(target_indices)
+                sid, chrom, status_list[orig_idx], int(lib_reads[orig_idx]),
+                lib_source[orig_idx], len(target_indices),
             ))
             continue
 
@@ -1350,15 +1498,16 @@ def main() -> None:
             and target_cr >= DUP_COPY_RATIO_MIN
 
         if is_del or is_dup:
-            ctype, c_start, c_end, c_size = estimate_cnv_span(
+            ctype, c_start, c_end, c_size, c_truncated = estimate_cnv_span(
                 z_row, cr_row, bin_starts, bin_ends, target_indices, args.z_thresh
             )
         elif not np.isfinite(target_cr):
             # No usable signal in the target bins: report it instead of calling NORMAL
-            ctype, c_start, c_end, c_size = "NO_SIGNAL", 0, 0, 0
+            ctype, c_start, c_end, c_size, c_truncated = "NO_SIGNAL", 0, 0, 0, False
         else:
-            ctype, c_start, c_end, c_size = "NORMAL", 0, 0, 0
+            ctype, c_start, c_end, c_size, c_truncated = "NORMAL", 0, 0, 0, False
 
+        has_span = ctype not in ("NORMAL", "NO_SIGNAL")
         row_dict: Dict[str, object] = {
             "sample_id": sid,
             "status": "OK",
@@ -1372,10 +1521,39 @@ def main() -> None:
             "total_target_bins": len(target_indices),
             "cnv_call": ctype,
             "noise_status": noise_status,
-            "est_cnv_start": c_start if ctype not in ("NORMAL", "NO_SIGNAL") else "NA",
-            "est_cnv_end": c_end if ctype not in ("NORMAL", "NO_SIGNAL") else "NA",
-            "est_cnv_size_bp": c_size if ctype not in ("NORMAL", "NO_SIGNAL") else "NA",
+            "est_cnv_start": c_start if has_span else "NA",
+            "est_cnv_end": c_end if has_span else "NA",
+            "est_cnv_size_bp": c_size if has_span else "NA",
+            "est_cnv_truncated": int(c_truncated) if has_span else "NA",
+            "target_chrom": chrom,
         }
+
+        # The segment table answers 'where else is something wrong?', so it covers the whole
+        # scan window of every QC-passing sample, not only the target of a called sample.
+        runs = find_segments(z_row, cr_row, bin_starts, bin_ends, target_indices, args.z_thresh)
+        if runs:
+            n_seg_samples += 1
+            
+        for seg_index, seg in enumerate(runs, start=1):
+            segment_rows.append({
+                "sample_id": sid,
+                "chrom": chrom,
+                "seg_index": seg_index,
+                "seg_start": seg["start"],
+                "seg_end": seg["end"],
+                "seg_size_bp": seg["size_bp"],
+                "direction": seg["direction"],
+                "n_bins": seg["n_bins"],
+                "mean_copy_ratio": fmt_num(float(seg["mean_copy_ratio"]), 4),
+                "mean_z": fmt_num(float(seg["mean_z"]), 3),
+                "peak_z": fmt_num(float(seg["peak_z"]), 3),
+                "in_target": int(bool(seg["in_target"])),
+                # Repeated from the sample table on purpose: a run found in a noisy library
+                # must be filterable inside the segment table itself.
+                "noise_status": noise_status,
+                "truncated_left": int(bool(seg["truncated_left"])),
+                "truncated_right": int(bool(seg["truncated_right"])),
+            })
 
         report_rows.append(row_dict)
         # Candidates are the calls a reviewer should look at; a high-noise sample goes to its
@@ -1415,6 +1593,16 @@ def main() -> None:
 
     write_report(all_out, report_rows)
     write_report(cand_out, candidate_rows)
+
+    # Always written, table header included: a downstream reader must not have to tell
+    # 'no abnormal run anywhere' apart from 'this run produced no such file'.
+    seg_out = Path(f"{args.out_prefix}.segments.tsv")
+    write_report(seg_out, segment_rows, columns=SEGMENT_COLUMNS)
+    n_in_target = sum(1 for row in segment_rows if row["in_target"] == 1)
+    print(f"[INFO] Wrote {len(segment_rows)} segment(s) from {n_seg_samples} sample(s) "
+          f"across the scan window ({n_in_target} overlapping the target) to {seg_out}",
+          file=sys.stderr)
+
     if noise_threshold > 0:
         # Only meaningful when the gate is on: an always-empty table just adds noise.
         write_report(Path(f"{args.out_prefix}.high_noise.tsv"), high_noise_rows)
@@ -1480,12 +1668,14 @@ def main() -> None:
 
     if n_no_signal:
         print(f"[WARN] {n_no_signal} sample(s) had no usable target-region signal (called NO_SIGNAL).", file=sys.stderr)
+        
     if noise_threshold > 0 and high_noise_rows:
         n_noisy_calls = sum(1 for row in high_noise_rows if row["cnv_call"] in ("DEL", "DUP"))
         print(f"[WARN] {len(high_noise_rows)} sample(s) exceeded --max-flanking-mad "
               f"{noise_threshold:g} and were moved out of the candidate list"
               f"{f' ({n_noisy_calls} still carry a DEL/DUP call)' if n_noisy_calls else ''}; "
               f"see {args.out_prefix}.high_noise.tsv", file=sys.stderr)
+        
     if n_valid < total_input:
         print(f"[INFO] {total_input - n_valid} sample(s) skipped, by reason:", file=sys.stderr)
         print_status_summary(status_list)
