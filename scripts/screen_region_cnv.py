@@ -1017,7 +1017,7 @@ def plot_cohort_overview(
                 )
                 
     if len(labelled) < n_cand:
-        rank_title = (f"copy ratio by rank: {n_cand} candidates, extremes labelled "
+        rank_title = (f"copy ratio by rank: {n_cand} candidates, extremes labelled\n"
                       f"(full list in the candidates table)")
     else:
         rank_title = "copy ratio by rank: the tails are the candidates"
